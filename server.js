@@ -26,7 +26,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createDecartClient } from "@decartai/sdk";
 import { logTryOn } from "./lib/sheets.js";
-import { supabase } from "./lib/supabase.js";
+import { authSupabase, appSupabase } from "./lib/supabase.js";
 
 logTryOn({ garmentName: "Local Test Shirt", size: "XL" }).catch(e => console.error("Sheets test failed:", e.message));
 
@@ -448,22 +448,40 @@ app.get("/api/test-sheets", requireAdminAuth, async (req, res) => {
 /* ── Session persistence ──────────────────────────────────────────────────────
    Durable storage via Supabase (Postgres). Survives cold starts, redeploys,
    and is shared across all server instances. Requires the `sessions` table
-   created by supabase_setup.sql and two env vars:
-     SUPABASE_URL              - from Supabase Dashboard → Settings → API
-     SUPABASE_SERVICE_ROLE_KEY - from Supabase Dashboard → Settings → API
+   created by supabase_setup.sql, in the APP DATA project:
+     APP_SUPABASE_URL              - Supabase Dashboard → Settings → API
+     APP_SUPABASE_SERVICE_ROLE_KEY - Supabase Dashboard → Settings → API
+   NOT the SUPABASE_* pair — those name the admin AUTH project, which holds no
+   application tables. Reading data from it is what produced a dashboard that
+   rendered empty with no error at all. See lib/supabase.js.
    ──────────────────────────────────────────────────────────────────────────── */
-console.log(`[sessions] storage backend: ${supabase ? "Supabase" : "DISABLED (env vars missing)"}`);
+console.log(`[sessions] data backend: ${appSupabase ? "Supabase (app project)" : "DISABLED (APP_SUPABASE_* missing)"}`);
+console.log(`[admin-auth] auth backend: ${authSupabase ? "Supabase (auth project)" : "DISABLED (SUPABASE_* missing)"}`);
 
-/* Guard for Supabase-backed routes. When the client is null (env vars missing)
-   we return a clear 503 instead of dereferencing null and crashing. Returns true
-   when it has already sent the error response, so the caller should `return`. */
+/* Guards for the two clients. When a client is null (env vars missing) these
+   return a clear 503 instead of dereferencing null and crashing. Each returns
+   true once it has sent the response, so the caller should `return`.
+
+   They are deliberately separate: the app-data client being down must not block
+   admin token verification, and vice versa. Naming the right variable in the
+   message is the difference between a one-minute fix and an afternoon. */
 function storageUnavailable(res) {
-  if (supabase) return false;
+  if (appSupabase) return false;
   res.status(503).json({
     ok: false,
     error: "storage_unconfigured",
-    message: "Database not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing). " +
-             "Session and user features are temporarily unavailable.",
+    message: "App database not configured (APP_SUPABASE_URL / APP_SUPABASE_SERVICE_ROLE_KEY " +
+             "missing). Session and user features are temporarily unavailable.",
+  });
+  return true;
+}
+
+function authUnavailable(res) {
+  if (authSupabase) return false;
+  res.status(503).json({
+    ok: false,
+    error: "auth_unconfigured",
+    message: "Admin auth not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing).",
   });
   return true;
 }
@@ -533,14 +551,14 @@ function describeJwt(token) {
         the sessions table.
    On success the verified email is attached as req.adminEmail for audit logging. */
 async function requireAdminAuth(req, res, next) {
-  if (storageUnavailable(res)) return;   // no Supabase client → can't verify → fail closed
+  if (authUnavailable(res)) return;   // no auth client → can't verify → fail closed
   const auth  = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
   if (!token) {
     return res.status(401).json({ ok: false, error: "unauthorized", message: "Missing auth token." });
   }
   try {
-    const { data: { user }, error } = await supabase.auth.getUser(token);
+    const { data: { user }, error } = await authSupabase.auth.getUser(token);
     if (error || !user) {
       // Name the fault. A bare "invalid token" is indistinguishable between an
       // expired session, a token minted by a DIFFERENT Supabase project, and a
@@ -602,7 +620,7 @@ async function requireAdminAuth(req, res, next) {
 }
 
 async function readSessionLogs() {
-  const { data, error } = await supabase
+  const { data, error } = await appSupabase
     .from("sessions")
     .select("*")
     .order("created_at", { ascending: false });
@@ -611,7 +629,7 @@ async function readSessionLogs() {
 }
 
 async function saveSessionLog(entry) {
-  const { error } = await supabase.from("sessions").insert([entry]);
+  const { error } = await appSupabase.from("sessions").insert([entry]);
   if (error) throw new Error(error.message);
   // Return approximate total count without a separate COUNT query.
   return null;
@@ -619,7 +637,7 @@ async function saveSessionLog(entry) {
 
 async function clearSessionLogs() {
   // Delete every row. Supabase requires a filter for safety; `neq` on id covers all rows.
-  const { error } = await supabase.from("sessions").delete().neq("id", 0);
+  const { error } = await appSupabase.from("sessions").delete().neq("id", 0);
   if (error) throw new Error(error.message);
 }
 
@@ -637,7 +655,7 @@ async function clearSessionLogs() {
    most recently touched row, an accepted tradeoff for the auto-login convenience
    (see fitting-room/app.js setupIdentityGate comment). */
 async function findUserByDeviceId(deviceId) {
-  const { data, error } = await supabase
+  const { data, error } = await appSupabase
     .from("users")
     .select("*")
     .eq("device_id", deviceId)
@@ -666,7 +684,7 @@ async function findUserByEmail(email) {
   // email 500s - masquerading as "the whole feature doesn't work." Taking the
   // most recent of any duplicates keeps this working even before that legacy
   // data is cleaned up.
-  const { data, error } = await supabase
+  const { data, error } = await appSupabase
     .from("users")
     .select("*")
     .eq("email", norm)
@@ -816,7 +834,7 @@ async function createUser(req, res) {
   // the normal path and the insert-race fallback below.
   const respondForExistingEmail = async (row) => {
     if (sameName(row.name, name)) {
-      await supabase.from("users").update({ device_id: deviceId }).eq("id", row.id);
+      await appSupabase.from("users").update({ device_id: deviceId }).eq("id", row.id);
       console.log(`[users] name+email match → auto-login user ${row.id}, relinked device "${deviceId}"`);
       return {
         status: 200,
@@ -837,7 +855,7 @@ async function createUser(req, res) {
       return res.status(status).json(body);
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await appSupabase
       .from("users")
       .insert([{ device_id: deviceId, name, email }])
       .select()
@@ -900,7 +918,7 @@ async function updateUserMeasurements(req, res) {
     const user = await findUserByDeviceId(deviceId);
     if (!user) return res.status(404).json({ ok: false, error: "not_found" });
 
-    const { error } = await supabase
+    const { error } = await appSupabase
       .from("users")
       .update({ height, weight })
       .eq("id", user.id);
@@ -921,8 +939,8 @@ async function getUsersWithCounts(_req, res) {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate");
   try {
     const [{ data: users, error: uErr }, { data: rows, error: sErr }] = await Promise.all([
-      supabase.from("users").select("*").order("created_at", { ascending: false }),
-      supabase.from("sessions").select("user_id"),
+      appSupabase.from("users").select("*").order("created_at", { ascending: false }),
+      appSupabase.from("sessions").select("user_id"),
     ]);
     if (uErr) throw new Error(uErr.message);
     if (sErr) throw new Error(sErr.message);
@@ -954,7 +972,7 @@ async function getAverageMeasurements(_req, res) {
   if (storageUnavailable(res)) return;
   res.set("Cache-Control", "no-store, no-cache, must-revalidate");
   try {
-    const { data, error } = await supabase
+    const { data, error } = await appSupabase
       .from("users")
       .select("height, weight")
       .not("height", "is", null)
@@ -1166,7 +1184,7 @@ async function findSupabaseUserByEmail(email) {
   const PER_PAGE = 200;
   const MAX_PAGES = 10;
   for (let page = 1; page <= MAX_PAGES; page += 1) {
-    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage: PER_PAGE });
+    const { data, error } = await authSupabase.auth.admin.listUsers({ page, perPage: PER_PAGE });
     if (error) throw new Error(error.message || "listUsers failed");
     const users = data?.users || [];
     const hit = users.find((u) => (u.email || "").toLowerCase() === email);
@@ -1357,8 +1375,8 @@ app.post("/api/auth/reset-password", resetLimiter, async (req, res) => {
     });
   }
 
-  if (!supabase) {
-    console.error("[admin-reset] Supabase unavailable — set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
+  if (!authSupabase) {
+    console.error("[admin-reset] auth Supabase client unavailable — set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
     return res.status(503).json({
       ok: false, error: "auth_store_unavailable",
       message: "שירות האימות אינו זמין כעת.",
@@ -1371,7 +1389,7 @@ app.post("/api/auth/reset-password", resetLimiter, async (req, res) => {
       console.error("[admin-reset] allowlisted address has no matching Supabase user");
       return res.status(404).json({ ok: false, error: "user_not_found", message: "לא נמצא משתמש תואם." });
     }
-    const { error } = await supabase.auth.admin.updateUserById(user.id, { password });
+    const { error } = await authSupabase.auth.admin.updateUserById(user.id, { password });
     if (error) {
       console.error("[admin-reset] password update failed:", error?.status || "", error?.name || "error");
       return res.status(502).json({ ok: false, error: "update_failed", message: "עדכון הסיסמה נכשל." });
@@ -1559,8 +1577,8 @@ async function classifyFrontBack(imageUrl) {
 }
 
 async function getCachedClassification(imageUrl) {
-  if (!supabase) return null;
-  const { data, error } = await supabase
+  if (!appSupabase) return null;
+  const { data, error } = await appSupabase
     .from("garment_cache")
     .select("classification")
     .eq("image_url", imageUrl)
@@ -1570,8 +1588,8 @@ async function getCachedClassification(imageUrl) {
 }
 
 async function saveClassification(imageUrl, classification) {
-  if (!supabase) return;
-  const { data, error } = await supabase
+  if (!appSupabase) return;
+  const { data, error } = await appSupabase
     .from("garment_cache")
     .upsert([{ image_url: imageUrl, classification }], { onConflict: "image_url" });
   console.log('[classify] Supabase save result:', data, error);
@@ -1638,11 +1656,11 @@ app.post("/api/store-catalog", storeCatalogLimiter, async (req, res) => {
   if (!domain) {
     return res.status(400).json({ error: "missing_domain", message: "domain is required." });
   }
-  if (!supabase) {
+  if (!appSupabase) {
     return res.json({ items: [] });   // DB not configured - empty result, not an error the caller must handle
   }
   try {
-    const { data, error } = await supabase
+    const { data, error } = await appSupabase
       .from("garment_cache")
       .select("image_url, classification")
       .ilike("image_url", `%${domain}%`)

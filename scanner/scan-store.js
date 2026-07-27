@@ -27,17 +27,33 @@ import { createClient } from "@supabase/supabase-js";
 // Node.js 20+ has built-in fetch — no node-fetch dependency needed.
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const SUPABASE_URL = process.env.SUPABASE_URL || "";
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+
+/* garment_cache is an APPLICATION table, so this writes to the APP DATA project
+   (see lib/supabase.js for why there are two). APP_SUPABASE_* is preferred; the
+   bare SUPABASE_* pair is kept as a fallback so a standalone scanner/.env that
+   predates the split still works. Falling back matters less here than it would
+   on the server: this is an interactive CLI that prints which project it hit,
+   so a wrong target is visible immediately rather than silently empty. */
+const SUPABASE_URL =
+  process.env.APP_SUPABASE_URL || process.env.SUPABASE_URL || "";
+const SUPABASE_SERVICE_ROLE_KEY =
+  process.env.APP_SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const USING_APP_VARS = Boolean(process.env.APP_SUPABASE_URL);
 
 if (!GEMINI_API_KEY) {
   console.error("✗ GEMINI_API_KEY is not set — copy .env.example to .env and fill it in.");
   process.exit(1);
 }
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("✗ SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are not set — copy .env.example to .env and fill them in.");
+  console.error("✗ APP_SUPABASE_URL / APP_SUPABASE_SERVICE_ROLE_KEY are not set " +
+                "(SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY also accepted) — " +
+                "copy .env.example to .env and fill them in.");
   process.exit(1);
 }
+console.log(
+  `→ garment_cache target: ${(SUPABASE_URL.match(/^https:\/\/([^.]+)\./) || [])[1] || SUPABASE_URL}` +
+  ` (via ${USING_APP_VARS ? "APP_SUPABASE_*" : "SUPABASE_* fallback"})`
+);
 
 const storeUrl = process.argv[2];
 if (!storeUrl) {
