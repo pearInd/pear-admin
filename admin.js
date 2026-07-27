@@ -71,8 +71,28 @@
 (() => {
   "use strict";
 
-  const SUPABASE_URL      = "https://nhkaiucbaauqetaidgoi.supabase.co";
-  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5oa2FpdWNiYWF1cWV0YWlkZ29pIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4MTQ2NzIsImV4cCI6MjA5ODM5MDY3Mn0.t6uZbCmQUoeNdz1XkH1ZxwrcIcy7bxmvzezGcSUOLDU"; // Supabase Dashboard → Settings → API → anon public
+  /* Active project, confirmed 2026-07-27. The previous value pointed at project
+     "nhkaiucbaauqetaidgoi", which is what produced the 401s on /api/admin/whoami:
+     the server verified tokens against this project while the browser minted them
+     against the old one. The server's SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
+     must name this SAME project ref, or the mismatch simply moves rather than
+     being fixed. */
+  const SUPABASE_URL = "https://jyhilackhdjwkiiijtad.supabase.co";
+
+  /* ⚠ NOT YET SET — paste the anon key for project jyhilackhdjwkiiijtad here.
+     Supabase Dashboard → Settings → API → Project API keys → "anon public"
+     (or: supabase projects api-keys --project-ref jyhilackhdjwkiiijtad)
+
+     The old project's key was deliberately NOT carried over: it is a JWT signed
+     by the old project, and this project rejects it outright ("Invalid API key",
+     verified against the live endpoint). A key cannot be derived or edited into
+     the right one — only the Supabase dashboard can issue it.
+
+     This key is public by design: it ships to every browser and is safe in this
+     file. Its power is bounded by row-level security and, for the dashboard, by
+     the ADMIN_EMAILS allowlist the server enforces. Do NOT paste the
+     service_role key here — that one bypasses RLS entirely. */
+  const SUPABASE_ANON_KEY = "PASTE_ANON_KEY_FOR_jyhilackhdjwkiiijtad_HERE";
 
   const adminSupabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -84,6 +104,17 @@
     try {
       if (!window.supabase || typeof window.supabase.createClient !== "function") {
         console.error("[auth] the Supabase JS library did not load — check the CDN <script> in index.html.");
+        return;
+      }
+      // Placeholder still in place: say exactly that, rather than letting it fall
+      // through to a base64 decode failure that reads like a corrupt key.
+      if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.startsWith("PASTE_ANON_KEY")) {
+        console.error(
+          "[auth] SUPABASE_ANON_KEY is not set. Sign-in cannot work until it is.\n" +
+          "  Get it from: Supabase Dashboard → Settings → API → Project API keys → \"anon public\"\n" +
+          "  for project jyhilackhdjwkiiijtad, then replace the placeholder near the top of admin.js.\n" +
+          "  Use the anon key, never the service_role key."
+        );
         return;
       }
       const claims = JSON.parse(atob(SUPABASE_ANON_KEY.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
