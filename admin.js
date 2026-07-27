@@ -76,6 +76,34 @@
 
   const adminSupabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+  /* Boot-time config sanity check. A mismatched project ref, a key that is not
+     the anon key, or an expired key all surface at sign-in as an opaque 400,
+     which is indistinguishable from a wrong password. Checking here names the
+     real fault instead. Decodes only the PUBLIC anon JWT - no secret involved. */
+  (function verifySupabaseConfig() {
+    try {
+      if (!window.supabase || typeof window.supabase.createClient !== "function") {
+        console.error("[auth] the Supabase JS library did not load — check the CDN <script> in index.html.");
+        return;
+      }
+      const claims = JSON.parse(atob(SUPABASE_ANON_KEY.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+      const urlRef = (SUPABASE_URL.match(/^https:\/\/([^.]+)\./) || [])[1];
+      if (claims.role !== "anon") {
+        console.error(`[auth] SUPABASE_ANON_KEY has role "${claims.role}", expected "anon". ` +
+                      "Never ship a service_role key to the browser.");
+      }
+      if (claims.ref && urlRef && claims.ref !== urlRef) {
+        console.error(`[auth] key/project mismatch: SUPABASE_URL points at "${urlRef}" but the ` +
+                      `anon key belongs to "${claims.ref}". Every auth call will fail.`);
+      }
+      if (claims.exp && claims.exp * 1000 < Date.now()) {
+        console.error("[auth] SUPABASE_ANON_KEY expired on " + new Date(claims.exp * 1000).toISOString());
+      }
+    } catch (err) {
+      console.warn("[auth] could not decode SUPABASE_ANON_KEY:", err?.message || err);
+    }
+  })();
+
   /* ── Password reset ───────────────────────────────────────────────────────────
      Mirror of PASSWORD_RESET_EMAILS in server.js, kept here purely so a typo or a
      non-admin address fails instantly instead of after a round-trip. It is NOT
@@ -308,24 +336,98 @@
       emailError.hidden = true;
       setBusy(true);
 
-      const email    = emailInput.value.trim();
+      // Email: trim AND lowercase. Supabase stores addresses lowercased, and a
+      // stray space from autofill or a mobile keyboard is the single most common
+      // way a correct credential gets rejected.
+      const email    = emailInput.value.trim().toLowerCase();
       const password = passwordInput.value;
       if (!email || !password) return showError("יש להזין אימייל וסיסמה");
 
-      signInProbeInProgress = true;
-      const { data, error } = await adminSupabase.auth.signInWithPassword({ email, password });
+      // Password is sent EXACTLY as typed - deliberately not trimmed. A password
+      // may legitimately start or end with a space, and silently rewriting it
+      // would turn a correct credential into a wrong one (and would not match
+      // what Supabase stored when it was set). Surfaced in the console instead,
+      // because invisible whitespace is impossible to spot in a password field.
+      if (password !== password.trim()) {
+        console.warn(
+          "[auth] password field has leading/trailing whitespace. It is being sent " +
+          "exactly as typed. If sign-in fails, check for a stray space from autofill."
+        );
+      }
 
-      if (error) {
-        // Status/name only - never the body, which can carry session material.
-        console.warn("[auth] sign-in failed:", error?.status || "", error?.name || "error");
-        // One message for both "no such user" and "wrong password", so the form
-        // does not confirm which addresses have accounts.
-        showError("אימייל או סיסמה שגויים");
+      signInProbeInProgress = true;
+
+      // signInWithPassword rejects (rather than returning an error) on a network
+      // failure or a bad SUPABASE_URL. Unguarded, that would escape this async
+      // listener and leave signInProbeInProgress stuck on, which soft-locks the
+      // page: onAuthStateChange would then refuse to open the dashboard for the
+      // rest of the session, with no visible reason.
+      let data, error;
+      try {
+        ({ data, error } = await adminSupabase.auth.signInWithPassword({ email, password }));
+      } catch (err) {
+        console.error("[auth] signInWithPassword threw before returning a result", {
+          name: err?.name, message: err?.message, supabaseUrl: SUPABASE_URL,
+        });
+        showError("לא ניתן להתחבר לשרת האימות. בדוק את החיבור לרשת.");
         return;
       }
 
-      const token = data?.session?.access_token;
+      if (error) {
+        // Full detail to the console. This is a client-side auth failure - it
+        // carries no session material - and without the code the common causes
+        // are indistinguishable from each other.
+        console.error("[auth] signInWithPassword failed", {
+          name:       error?.name,
+          httpStatus: error?.status,     // 400 for a rejected credential
+          code:       error?.code,       // e.g. "invalid_credentials"
+          message:    error?.message,
+          emailSent:  email,             // exactly what was transmitted
+          passwordLength: password.length,   // never the value itself
+        });
+
+        const code = error?.code || "";
+        if (code === "email_not_confirmed") {
+          showError("החשבון לא אומת. יש לאשר את כתובת האימייל לפני התחברות.");
+        } else if (error?.status === 429 || code === "over_request_rate_limit") {
+          showError("יותר מדי ניסיונות התחברות. נסה שוב בעוד מספר דקות.");
+        } else if (code === "invalid_credentials") {
+          // Supabase returns this ONE code for three different situations: no
+          // such user, wrong password, and "user exists but has no password set"
+          // — which is the state of any account that only ever used magic links.
+          // Not distinguished in the UI (that would confirm which addresses have
+          // accounts); the console line above is where they are told apart.
+          console.info(
+            "[auth] invalid_credentials covers: no such user / wrong password / " +
+            "account has no password set. An account created via magic link has " +
+            "none until one is set in Supabase → Authentication → Users, or via " +
+            "the \"שכחת סיסמה?\" reset flow."
+          );
+          showError("אימייל או סיסמה שגויים");
+        } else {
+          showError("ההתחברות נכשלה. בדוק את הקונסול לפרטים.");
+        }
+        return;
+      }
+
+      // Read the token back out of the STORED session rather than trusting the
+      // sign-in response alone: getSession() reflects what supabase-js actually
+      // persisted, so the probe below can never run against a token the client
+      // failed to save (which would authorize the page while every later
+      // authedFetch quietly 401s).
+      let stored = null;
+      try {
+        ({ data: stored } = await adminSupabase.auth.getSession());
+      } catch (err) {
+        // Non-fatal: fall back to the token the sign-in call already returned.
+        console.warn("[auth] getSession() failed, using the sign-in response token:", err?.message || err);
+      }
+      const token = stored?.session?.access_token || data?.session?.access_token;
       if (!token) {
+        console.error("[auth] sign-in reported success but no session was stored", {
+          hadResponseSession: Boolean(data?.session),
+          hadStoredSession:   Boolean(stored?.session),
+        });
         showError("ההתחברות נכשלה, נסה שוב");
         return;
       }
@@ -336,18 +438,36 @@
       try {
         const resp = await fetch("/api/admin/whoami", { headers: { Authorization: `Bearer ${token}` } });
         if (!resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          console.error("[auth] authorization probe rejected", {
+            httpStatus: resp.status,
+            error:      body?.error,
+            message:    body?.message,
+          });
           await adminSupabase.auth.signOut();
           if (resp.status === 503) {
-            // ADMIN_EMAILS unset on this deployment - a config fault, not a
-            // credential one. Say so, or this looks like a rejected password.
+            // Server-side config fault, not a credential one - ADMIN_EMAILS is
+            // unset (allowlist unconfigured) or Supabase env vars are missing.
+            // Say so, or this reads as a rejected password.
+            console.error(
+              "[auth] 503 here means the SERVER is misconfigured, not your password. " +
+              "Set ADMIN_EMAILS (and SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY) in the " +
+              "deployment environment."
+            );
             showError("גישת מנהל אינה מוגדרת בשרת. פנה למנהל המערכת.");
-          } else {
+          } else if (resp.status === 403) {
+            console.error(
+              `[auth] signed in as "${email}", but that address is not in ADMIN_EMAILS ` +
+              "on the server. Authentication succeeded; authorization did not."
+            );
             showError("חשבון זה אינו מורשה לגשת ללוח הבקרה");
+          } else {
+            showError("שגיאת הרשאה, נסה שוב");
           }
           return;
         }
       } catch (err) {
-        console.warn("[auth] authorization probe failed:", err?.message || err);
+        console.error("[auth] authorization probe could not reach the server:", err?.message || err);
         await adminSupabase.auth.signOut();
         showError("שגיאת התחברות, נסה שוב");
         return;
