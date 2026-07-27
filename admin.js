@@ -79,20 +79,21 @@
      being fixed. */
   const SUPABASE_URL = "https://jyhilackhdjwkiiijtad.supabase.co";
 
-  /* ⚠ NOT YET SET — paste the anon key for project jyhilackhdjwkiiijtad here.
-     Supabase Dashboard → Settings → API → Project API keys → "anon public"
-     (or: supabase projects api-keys --project-ref jyhilackhdjwkiiijtad)
+  /* anon public key for project jyhilackhdjwkiiijtad.
+     Supabase Dashboard → Settings → API → Project API keys → "anon public".
+     Verified 2026-07-27: role=anon, ref=jyhilackhdjwkiiijtad, expires 2036-07-25,
+     and accepted by the live project (GET /auth/v1/settings → 200).
 
-     The old project's key was deliberately NOT carried over: it is a JWT signed
-     by the old project, and this project rejects it outright ("Invalid API key",
-     verified against the live endpoint). A key cannot be derived or edited into
-     the right one — only the Supabase dashboard can issue it.
+     Public by design — it ships to every browser and is safe in this file. Its
+     power is bounded by row-level security, and for the dashboard additionally
+     by the ADMIN_EMAILS allowlist the server enforces on every /api/admin route.
+     Never put the service_role key here: that one bypasses RLS entirely.
 
-     This key is public by design: it ships to every browser and is safe in this
-     file. Its power is bounded by row-level security and, for the dashboard, by
-     the ADMIN_EMAILS allowlist the server enforces. Do NOT paste the
-     service_role key here — that one bypasses RLS entirely. */
-  const SUPABASE_ANON_KEY = "PASTE_ANON_KEY_FOR_jyhilackhdjwkiiijtad_HERE";
+     Must stay in step with SUPABASE_URL above AND with the server's
+     SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY. A token minted here is verified
+     there, so if the two name different projects every admin call 401s — which
+     is exactly what the previous nhkaiucbaauqetaidgoi value caused. */
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp5aGlsYWNraGRqd2tpaWlqdGFkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ5OTQ5NDIsImV4cCI6MjEwMDU3MDk0Mn0.GXA5lGSlGD6W2jIHScL14KQrZu4ck2Gvtk43ztNvXgE";
 
   const adminSupabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
