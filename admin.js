@@ -252,7 +252,10 @@
           // domain situation changes again. NOTE: this exact origin must also be
           // present in Supabase → Authentication → URL Configuration → Redirect
           // URLs, or Supabase will reject/ignore the redirect.
-          emailRedirectTo: window.location.origin + "/admin/",
+          // PATH: the dashboard now IS the site root (index.html), not /admin/,
+          // so send the magic link back to "/" - pointing at /admin/ would land
+          // admins on a path that no longer exists.
+          emailRedirectTo: window.location.origin + "/",
         },
       });
 

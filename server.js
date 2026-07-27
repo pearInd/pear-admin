@@ -352,7 +352,7 @@ function mountTokenRoute(p) {
       res.set("Allow", "GET, POST, OPTIONS").status(405).json({
         error:   "method_not_allowed",
         message: `Use GET or POST on ${p}. If you're getting 405, make sure the page is ` +
-                 `served by THIS Express server: http://localhost:${PORT}/pear-demo/`,
+                 `served by THIS Express server: http://localhost:${PORT}/fitting-room/`,
       })
     );
 }
@@ -1268,14 +1268,11 @@ app.get("/widget/guide", (req, res) => {
   res.sendFile(path.join(__dirname, "widget/pear-widget-guide.html"));
 });
 
-/* Root → admin dashboard. The dashboard has to keep living at /admin/ because
-   the Supabase magic link hard-codes that path (see admin/admin.js
-   emailRedirectTo), so this redirects rather than serving admin/index.html at
-   "/" - one canonical dashboard URL, and the auth round-trip still lands.
-   302 (not 301) so this stays trivially reversible; browsers cache 301s hard.
-   Declared before express.static so it wins over the storefront index.html,
-   which is still reachable at /index.html. */
-app.get("/", (_req, res) => res.redirect(302, "/admin/"));
+/* No root redirect: the dashboard IS index.html at the repo root, so the page
+   router below resolves "/" straight to it. (This previously redirected to
+   /admin/, which no longer exists — that path would now fall through to this
+   same index.html but with a /admin/ base URL, so admin.css/admin.js would
+   resolve to /admin/* and get served the HTML fallback instead of CSS/JS.) */
 
 /* ── Static hosting ──────────────────────────────────────────────────────── */
 const uiRoot = __dirname;
@@ -1310,7 +1307,7 @@ if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log("\n────────────────────────────────────────────────────────");
     console.log(`  PEAR VTON server → http://localhost:${PORT}`);
-    console.log(`  Storefront  : http://localhost:${PORT}/`);
+    console.log(`  Admin       : http://localhost:${PORT}/`);
     console.log(`  Fitting room: http://localhost:${PORT}/fitting-room/   ← OPEN THIS`);
     console.log(`  Decart      : ${decart ? `SDK ready (${VTON_MODEL}, TTL ${TOKEN_TTL}s)` : "SDK not ready - will use REST fallback"}`);
     console.log(`  Key source  : ${KEY_SOURCE || "(none - set DECART_API_KEY in .env)"}`);

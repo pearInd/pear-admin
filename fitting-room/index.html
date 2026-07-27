@@ -242,18 +242,13 @@
     <div class="app-header">
         <!-- Nav zone (start / right in RTL): storefront + edit-measurements. -->
         <div class="app-header__nav">
-        <!-- Back to Store — breaks out of any iframe (target="_top") and returns
-             to the storefront homepage. Explicit /index.html: "/" now redirects
-             to the admin dashboard, which is not where shoppers should land. -->
-        <a class="back-to-store" href="/index.html" target="_top" aria-label="חזרה לחנות · Back to store">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
-                 stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M4 9.5 5.4 4h13.2L20 9.5"/>
-                <path d="M4.5 9.5h15V19a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V9.5Z"/>
-                <path d="M10 20v-5h4v5"/>
-            </svg>
-            <span>חזרה לחנות</span>
-        </a>
+        <!-- Back to Store — REMOVED. This repo no longer ships a storefront: the
+             root index.html is the admin dashboard, so the link's old targets
+             ("/" and "/index.html") would both drop shoppers onto an admin login.
+             The markup (anchor + shop SVG + "חזרה לחנות") is in git history at
+             this line; restore it pointing at the merchant's own URL if the
+             fitting room is embedded somewhere that needs a way back. -->
+        <!-- .back-to-store styling is retained in style.css for that restore. -->
         <!-- Edit Measurements — always visible in the fitting room so a returning
              visitor whose profile was applied automatically (see routeUser in
              app.js) can jump back and correct it without hunting for it. -->

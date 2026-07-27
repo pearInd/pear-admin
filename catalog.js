@@ -1,8 +1,13 @@
 /* ============================================================
    MERIDIAN — shared catalog data + garment SVG generator.
-   Loaded before store.js (homepage) and product.js (product page)
-   so both render from a single source of truth. Plain globals,
-   no build step.
+   Plain browser globals, no build step, no imports.
+
+   NOTE: this is no longer a browser file. The storefront that loaded it
+   (store.js / product.js) has been removed along with the storefront itself.
+   Its only remaining consumer is scripts/batch-scan-clothes.js, which reads
+   it in a node:vm sandbox to pull PRODUCTS + productImages() for the
+   `npm run scan:clothes` pipeline. Keep it dependency-free and side-effect-
+   free at top level or that sandbox load will break.
    ============================================================ */
 "use strict";
 
@@ -13,7 +18,8 @@
    hotlinkable retail/CDN endpoints; each was downloaded and VISUALLY verified
    (not just checked for HTTP 200). If any URL ever fails to load, garmentImg()
    falls back to the procedural garmentSVG() (itself pure-white) so the layout
-   never breaks. Mirror of pear-demo/app.js PEAR_CATALOG — keep the two in sync. */
+   never breaks. (Previously mirrored pear-demo/app.js PEAR_CATALOG; that folder
+   had no entry point and has been removed, so this is now the single source.) */
 
 /* ── catalog ──
    schema: id, name, price, category, type, subType, color, isNew, fav, imageUrl */
