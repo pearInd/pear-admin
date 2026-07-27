@@ -1,40 +1,43 @@
 /* =============================================================================
    PEAR Admin Dashboard - client logic with Supabase Auth login gate
    -----------------------------------------------------------------------------
-   • Login gate: email + password are checked server-side against ADMIN_EMAILS /
-     ADMIN_PASSWORDS (see server.js /api/admin/check-auth) BEFORE a one-time
-     email magic link is requested. Only once both match does Supabase email a
-     sign-in link; the admin clicks it, Supabase redirects back here with a
-     session, and onAuthStateChange fires SIGNED_IN → dashboard access.
+   • Login gate, two distinct steps — do not collapse them:
+       AUTHENTICATION  signInWithPassword() against Supabase Auth. Runs browser →
+         Supabase using the public anon key; our server is not involved. It only
+         establishes WHO the caller is, and ANY Supabase Auth user in the project
+         can pass it.
+       AUTHORIZATION   GET /api/admin/whoami, which applies the ADMIN_EMAILS
+         allowlist through the same requireAdminAuth used by every data route. A
+         non-admin is signed straight back out.
    • On page load: getSession() → if valid session, skip to dashboard.
    • All data fetches carry a Bearer token; server verifies via getUser().
    -----------------------------------------------------------------------------
-   SUPABASE SETTINGS - one-time manual configuration required for magic-link login:
+   SUPABASE SETTINGS - one-time manual configuration:
 
      1. Enable the email provider:
         Supabase Dashboard → Authentication → Providers → Email
-        Make sure the Email provider is enabled (magic-link sign-in is on by
-        default for the email provider).
+        Password sign-in lives under this provider.
 
-     2. Allow this page as a redirect target:
-        Supabase Dashboard → Authentication → URL Configuration
-        Set Site URL and add the admin page URL under Redirect URLs so the
-        emailed link returns the admin here with a valid session.
+     2. Give each admin a password:
+        Supabase Dashboard → Authentication → Users
+        Sign-in now checks the Supabase account password. An admin who only ever
+        used magic links has none set and cannot log in until one exists — either
+        set it here, or have them use "Forgot password?" on the login form, which
+        writes one through the admin API.
 
-     3. (Optional) Customize the sign-in email:
-        Supabase Dashboard → Authentication → Email Templates → Magic Link
-        Edit the template to change the wording, branding, or subject line.
+     3. Consider disabling public sign-ups:
+        Supabase Dashboard → Authentication → Providers → Email → "Allow new
+        users to sign up". Anyone who can sign up gets a valid session against
+        the public anon key. ADMIN_EMAILS still refuses them at every data route,
+        but leaving sign-ups off keeps strangers out of the Users table entirely.
 
-     4. Set the link expiry to 60 seconds (matches the on-screen note):
-        Supabase Dashboard → Authentication → Configuration → OTP Expiry
-        Set it to 60 seconds so the link expires in step with this UI.
+     4. ADMIN_EMAILS (server env) is now the ONLY thing separating an admin from
+        any other authenticated user. requireAdminAuth FAILS CLOSED when it is
+        empty — every admin route answers 503 and the login form says admin
+        access is not configured. It must be set in .env and in Vercel.
 
-     NOTE: signInWithOtp() below uses shouldCreateUser: false, so ONLY existing
-     Supabase users can request a link. Add admin accounts under
-     Authentication → Users, and list their emails in the server's ADMIN_EMAILS
-     env var. Also set ADMIN_PASSWORDS with one password per email, in the SAME
-     ORDER as ADMIN_EMAILS - index i in ADMIN_EMAILS pairs with index i in
-     ADMIN_PASSWORDS (the server enforces both - see server.js).
+     NOTE: ADMIN_PASSWORDS is no longer read anywhere. The password lives hashed
+     in Supabase Auth, which is also what makes the reset flow below meaningful.
    -----------------------------------------------------------------------------
    FORGOT PASSWORD - does NOT use Supabase's recovery email. The OTP is generated,
    stored and checked by our own server, mailed through Resend, and the password
@@ -60,12 +63,10 @@
         8, letters + digits). passwordProblem() below repeats them only so the
         admin gets the message without a round-trip.
 
-   IMPORTANT - this reset does not currently change what the login form checks.
-   Sign-in verifies email+password against ADMIN_EMAILS / ADMIN_PASSWORDS (env
-   vars, see /api/admin/check-auth) and then sends a magic link; the Supabase
-   account password is not consulted anywhere in that path. So a completed reset
-   updates a credential the login gate ignores. To connect them, sign-in has to
-   move to adminSupabase.auth.signInWithPassword() - see the summary notes.
+   The reset and the login form now act on the SAME credential: the reset writes
+   the Supabase account password via the admin API, and signInWithPassword()
+   checks exactly that. (Until sign-in moved off ADMIN_PASSWORDS + magic link, a
+   completed reset changed a credential the login gate never consulted.)
    ============================================================================= */
 (() => {
   "use strict";
@@ -93,6 +94,14 @@
      unchanged. Also guards the getSession() check in init(). */
   let recoveryInProgress = false;
 
+  /* True between signInWithPassword() and the /api/admin/whoami answer.
+     signInWithPassword emits SIGNED_IN the moment credentials check out — i.e.
+     while the account is authenticated but not yet known to be AUTHORIZED. The
+     listener below would show the dashboard right then, so a non-admin would see
+     it flash up before the probe signed them out. This holds the listener off
+     until showLogin() has decided. */
+  let signInProbeInProgress = false;
+
   /* Module-scope HTML escaper. startDashboard() has its own esc(), but it is
      nested in that function and unreachable from the login/reset markup
      builders. Needed because the reset view interpolates a user-typed address
@@ -117,10 +126,11 @@
     return null;
   }
 
-  /* ── Login view markup - single screen, magic-link ──────────────────────────
-     One card: email field + כניסה עם קישור לאימייל button. After signInWithOtp succeeds a
-     confirmation message appears below the button; onAuthStateChange (see init)
-     loads the dashboard once the admin clicks the emailed link. */
+  /* ── Login view markup - email + password, direct sign-in ───────────────────
+     One card, one round-trip: signInWithPassword() against Supabase Auth returns
+     a session immediately. No emailed link to wait for, so there is no "check
+     your inbox" state - the form either fails with a message or the dashboard
+     replaces it. */
   function loginMarkup() {
     return `
     <div id="loginView" class="login-view">
@@ -138,8 +148,7 @@
             <input id="loginPassword" type="password" autocomplete="current-password" required placeholder="••••••••" dir="ltr">
           </div>
           <p id="emailError" class="login-error" hidden></p>
-          <button type="submit" id="sendCodeBtn" class="dash-btn login-submit">כניסה עם קישור לאימייל</button>
-          <p id="loginSent" class="login-hint" hidden>נשלח לך קישור לאימייל שלך. לחץ על הקישור כדי להיכנס.</p>
+          <button type="submit" id="loginSubmitBtn" class="dash-btn login-submit">כניסה</button>
           <button type="button" id="forgotPasswordBtn" class="login-back">שכחת סיסמה?</button>
         </form>
       </div>
@@ -260,90 +269,95 @@
     </div>`;
   }
 
-  /* ── Show login form - single screen, magic-link ────────────────────────────
-     email → server-side ADMIN_EMAILS check → signInWithOtp → confirmation msg.
-     The admin clicks the emailed link; onAuthStateChange (see init) fires
-     SIGNED_IN and loads the dashboard. */
+  /* ── Show login form - email + password against Supabase Auth ───────────────
+     signInWithPassword() proves WHO the user is and hands back a session. That
+     is authentication only: any Supabase Auth user in the project can pass it,
+     because sign-in talks straight to Supabase using the public anon key and
+     never touches our server. Authorization is the separate step below —
+     GET /api/admin/whoami runs the same ADMIN_EMAILS allowlist that guards every
+     data route, and a non-admin is signed straight back out.
+
+     Replaces the previous two-stage flow (ADMIN_PASSWORDS check, then a magic
+     link). The password now lives hashed in Supabase Auth instead of in an env
+     var, which is also what makes the forgot-password flow meaningful — before,
+     a completed reset changed a credential this form never consulted. */
   function showLogin() {
     document.getElementById("app").innerHTML = loginMarkup();
 
-    const emailForm    = document.getElementById("emailForm");
-    const emailInput   = document.getElementById("loginEmail");
+    const emailForm     = document.getElementById("emailForm");
+    const emailInput    = document.getElementById("loginEmail");
     const passwordInput = document.getElementById("loginPassword");
-    const emailError   = document.getElementById("emailError");
-    const sendCodeBtn  = document.getElementById("sendCodeBtn");
-    const sentMsg      = document.getElementById("loginSent");
+    const emailError    = document.getElementById("emailError");
+    const submitBtn     = document.getElementById("loginSubmitBtn");
 
+    function setBusy(busy) {
+      submitBtn.disabled = busy;
+      submitBtn.textContent = busy ? "..." : "כניסה";
+    }
     function showError(msg) {
-      sentMsg.hidden = true;
+      // Every failure path lands here, so releasing the listener guard here too
+      // means no early return can leave it stuck on.
+      signInProbeInProgress = false;
       emailError.textContent = msg;
       emailError.hidden = false;
-      sendCodeBtn.disabled = false;
-      sendCodeBtn.textContent = "כניסה עם קישור לאימייל";
+      setBusy(false);
     }
 
     emailForm.addEventListener("submit", async (e) => {
       e.preventDefault();
       emailError.hidden = true;
-      sentMsg.hidden = true;
-      sendCodeBtn.disabled = true;
-      sendCodeBtn.textContent = "...";
+      setBusy(true);
 
       const email    = emailInput.value.trim();
       const password = passwordInput.value;
+      if (!email || !password) return showError("יש להזין אימייל וסיסמה");
 
-      // Verify BOTH email and password against the server-side allowlist before
-      // requesting a magic link, so only verified admins trigger a Supabase
-      // email send. Sent as a POST body (not a GET query string) so the
-      // password never lands in a URL - URLs get written to server/proxy
-      // access logs and browser history in plaintext.
-      try {
-        const check = await fetch("/api/admin/check-auth", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
-        });
-        const { allowed } = await check.json();
-        if (!allowed) {
-          showError("אימייל או סיסמה שגויים");
-          return;
-        }
-      } catch (err) {
-        console.warn("[auth] check-auth failed:", err?.message || err);
+      signInProbeInProgress = true;
+      const { data, error } = await adminSupabase.auth.signInWithPassword({ email, password });
+
+      if (error) {
+        // Status/name only - never the body, which can carry session material.
+        console.warn("[auth] sign-in failed:", error?.status || "", error?.name || "error");
+        // One message for both "no such user" and "wrong password", so the form
+        // does not confirm which addresses have accounts.
         showError("אימייל או סיסמה שגויים");
         return;
       }
 
-      const { error } = await adminSupabase.auth.signInWithOtp({
-        email,
-        options: {
-          shouldCreateUser: false,
-          // DOMAIN FIX: was hardcoded to pear-web-demo.vercel.app, which is a
-          // separate/broken Vercel deployment this project doesn't control (see
-          // troubleshooting notes) - magic-link emails were bouncing admins to a
-          // stale build. window.location.origin always matches whatever domain
-          // this page was actually loaded from, so it self-corrects if the
-          // domain situation changes again. NOTE: this exact origin must also be
-          // present in Supabase → Authentication → URL Configuration → Redirect
-          // URLs, or Supabase will reject/ignore the redirect.
-          // PATH: the dashboard now IS the site root (index.html), not /admin/,
-          // so send the magic link back to "/" - pointing at /admin/ would land
-          // admins on a path that no longer exists.
-          emailRedirectTo: window.location.origin + "/",
-        },
-      });
-
-      // Log status only - never the response body (may carry session material).
-      console.log('[admin-login] Supabase error:', error);
-      if (error) {
-        console.warn("[auth] magic-link request failed:", error?.status || "", error?.name || "error");
-        showError("שגיאה בשליחת הקישור, נסה שוב");
+      const token = data?.session?.access_token;
+      if (!token) {
+        showError("ההתחברות נכשלה, נסה שוב");
         return;
       }
 
-      sendCodeBtn.disabled = false;
-      sendCodeBtn.textContent = "כניסה עם קישור לאימייל";
-      sentMsg.hidden = false;
+      // Authorization gate. Authenticated ≠ authorized: without this a valid
+      // non-admin account would land on the dashboard shell and only discover it
+      // is unwelcome when every panel failed to load.
+      try {
+        const resp = await fetch("/api/admin/whoami", { headers: { Authorization: `Bearer ${token}` } });
+        if (!resp.ok) {
+          await adminSupabase.auth.signOut();
+          if (resp.status === 503) {
+            // ADMIN_EMAILS unset on this deployment - a config fault, not a
+            // credential one. Say so, or this looks like a rejected password.
+            showError("גישת מנהל אינה מוגדרת בשרת. פנה למנהל המערכת.");
+          } else {
+            showError("חשבון זה אינו מורשה לגשת ללוח הבקרה");
+          }
+          return;
+        }
+      } catch (err) {
+        console.warn("[auth] authorization probe failed:", err?.message || err);
+        await adminSupabase.auth.signOut();
+        showError("שגיאת התחברות, נסה שוב");
+        return;
+      }
+
+      // Authorized. Release the guard and open the dashboard directly rather
+      // than waiting for another SIGNED_IN that will not come.
+      signInProbeInProgress = false;
+      setBusy(false);
+      showDashboard(token);
     });
 
     document.getElementById("forgotPasswordBtn")
@@ -1014,12 +1028,14 @@
     // Magic-link return: when the admin clicks the emailed link, Supabase
     // restores the session on page load and fires SIGNED_IN - load the dashboard.
     adminSupabase.auth.onAuthStateChange((event, session) => {
-      // The reset flow is entirely server-side now (Resend OTP + Supabase admin
-      // API), so it never mints a browser session and PASSWORD_RECOVERY no
-      // longer fires. recoveryInProgress still matters: a background token
-      // refresh can emit SIGNED_IN mid-reset, and honouring it would swap the
-      // half-finished reset view for the dashboard.
-      if (event === "SIGNED_IN" && session && !recoveryInProgress) {
+      // Two cases must NOT auto-open the dashboard:
+      //  • recoveryInProgress - a background token refresh mid-reset would swap
+      //    the half-finished reset view for the dashboard.
+      //  • signInProbeInProgress - signInWithPassword fires SIGNED_IN before the
+      //    authorization probe has run, so honouring it here would show the
+      //    dashboard to an account that is about to be rejected.
+      // This listener still matters for session restore on a fresh page load.
+      if (event === "SIGNED_IN" && session && !recoveryInProgress && !signInProbeInProgress) {
         showDashboard(session.access_token);
       }
     });

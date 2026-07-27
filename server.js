@@ -492,12 +492,20 @@ async function requireAdminAuth(req, res, next) {
     }
     const email = (user.email || "").toLowerCase();
     if (ADMIN_EMAILS.length === 0) {
-      // Allowlist not configured - fail OPEN for backward compatibility, but shout
-      // about it. Configure ADMIN_EMAILS to close this hole (see the env comment).
-      console.warn(
-        `[admin-auth] ⚠ ADMIN_EMAILS is empty - authorizing ANY authenticated user ` +
-        `(${email || "unknown"}). Set ADMIN_EMAILS to restrict admin access.`
+      // FAIL CLOSED. This used to fail open "for backward compatibility", which
+      // was survivable only because /api/admin/check-auth separately required a
+      // password from ADMIN_PASSWORDS before anyone could obtain a session at
+      // all. Sign-in is now plain Supabase signInWithPassword against the public
+      // anon key, so that second gate is gone: failing open here would authorize
+      // ANY Supabase Auth user in the project as a full admin.
+      console.error(
+        "[admin-auth] ADMIN_EMAILS is empty - refusing all admin access. " +
+        "Set ADMIN_EMAILS (comma-separated) in .env and in the Vercel project."
       );
+      return res.status(503).json({
+        ok: false, error: "admin_allowlist_unconfigured",
+        message: "Admin access is not configured on this deployment.",
+      });
     } else if (!ADMIN_EMAILS.includes(email)) {
       console.warn(`[admin-auth] blocked non-admin login: "${email}"`);
       return res.status(403).json({ ok: false, error: "forbidden", message: "Not an admin account." });
@@ -973,38 +981,23 @@ app.get("/api/users/:deviceId",   getUserByDevice);
 app.patch("/api/users/:deviceId", userLimiter, updateUserMeasurements);
 app.get("/api/admin/users",       requireAdminAuth, getUsersWithCounts);
 
-/* Pre-login allowlist check: the admin login page calls this before requesting a
-   magic link so only ADMIN_EMAILS + ADMIN_PASSWORDS matches ever trigger a
-   Supabase email send. Returns only { allowed: true|false } - no PII, no
-   token, no session. POST with a JSON body (not GET query params) so the
-   password is never written into a URL - URLs land in server/proxy access
-   logs and browser history in plaintext, which a query-string password would
-   leak into. ADMIN_PASSWORDS must list one password per ADMIN_EMAILS entry,
-   in the SAME ORDER (index i pairs with index i). Rate limited - this is a
-   password-guessing target. */
-app.post("/api/admin/check-auth", authLimiter, (req, res) => {
-  const email    = (req.body?.email || "").toLowerCase().trim();
-  const password = req.body?.password || "";
-  const allowed = (process.env.ADMIN_EMAILS || "")
-    .split(",")
-    .map((e) => e.toLowerCase().trim());
-  console.log('[admin-auth] email received:', email);
-  console.log('[admin-auth] allowed emails:', allowed);
-  const emailIndex = allowed.indexOf(email);
-  if (emailIndex === -1) {
-    console.log('[admin-auth] match result:', false);
-    return res.json({ allowed: false });
-  }
-  const passwords = (process.env.ADMIN_PASSWORDS || "")
-    .split(",")
-    .map((p) => p.trim());
-  const correctPassword = passwords[emailIndex];
-  if (!correctPassword || password !== correctPassword) {
-    console.log('[admin-auth] match result:', false);
-    return res.json({ allowed: false });
-  }
-  console.log('[admin-auth] match result:', true);
-  res.json({ allowed: true });
+/* Authorization probe for the login screen. Sign-in itself is now plain
+   Supabase signInWithPassword() straight from the browser — authentication no
+   longer passes through this server at all. That only proves WHO someone is;
+   this endpoint answers whether that identity is allowed in, using the same
+   requireAdminAuth allowlist every data route uses. The client calls it right
+   after sign-in and signs back out on 401/403/503, so a valid non-admin Supabase
+   account gets a clear refusal instead of an empty, silently-failing dashboard.
+
+   Replaces POST /api/admin/check-auth, which compared a plaintext password
+   against ADMIN_PASSWORDS. That env var is no longer read anywhere: the password
+   now lives in Supabase Auth, where it is hashed, and is what the
+   forgot-password flow resets. ADMIN_PASSWORDS can be removed from .env and from
+   the Vercel project.
+
+   Returns only the caller's own verified email — nothing they did not present. */
+app.get("/api/admin/whoami", authLimiter, requireAdminAuth, (req, res) => {
+  res.json({ ok: true, email: req.adminEmail });
 });
 
 /* ═══════════════════════════════════════════════════════════════════════════
