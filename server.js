@@ -1268,6 +1268,15 @@ app.get("/widget/guide", (req, res) => {
   res.sendFile(path.join(__dirname, "widget/pear-widget-guide.html"));
 });
 
+/* Root → admin dashboard. The dashboard has to keep living at /admin/ because
+   the Supabase magic link hard-codes that path (see admin/admin.js
+   emailRedirectTo), so this redirects rather than serving admin/index.html at
+   "/" - one canonical dashboard URL, and the auth round-trip still lands.
+   302 (not 301) so this stays trivially reversible; browsers cache 301s hard.
+   Declared before express.static so it wins over the storefront index.html,
+   which is still reachable at /index.html. */
+app.get("/", (_req, res) => res.redirect(302, "/admin/"));
+
 /* ── Static hosting ──────────────────────────────────────────────────────── */
 const uiRoot = __dirname;
 

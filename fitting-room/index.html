@@ -243,8 +243,9 @@
         <!-- Nav zone (start / right in RTL): storefront + edit-measurements. -->
         <div class="app-header__nav">
         <!-- Back to Store — breaks out of any iframe (target="_top") and returns
-             to the storefront homepage. -->
-        <a class="back-to-store" href="/" target="_top" aria-label="חזרה לחנות · Back to store">
+             to the storefront homepage. Explicit /index.html: "/" now redirects
+             to the admin dashboard, which is not where shoppers should land. -->
+        <a class="back-to-store" href="/index.html" target="_top" aria-label="חזרה לחנות · Back to store">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
                  stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M4 9.5 5.4 4h13.2L20 9.5"/>
