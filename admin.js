@@ -331,6 +331,18 @@
       setBusy(false);
     }
 
+    /* Single place that builds the authorized request, so the header can never
+       drift between the first attempt and the post-refresh retry. cache: "no-store"
+       because an authorization answer must never be served from a cached response
+       belonging to a previous session. */
+    function probeWhoami(tk) {
+      return fetch("/api/admin/whoami", {
+        method: "GET",
+        cache: "no-store",
+        headers: { Authorization: `Bearer ${tk}` },
+      });
+    }
+
     emailForm.addEventListener("submit", async (e) => {
       e.preventDefault();
       emailError.hidden = true;
@@ -422,7 +434,8 @@
         // Non-fatal: fall back to the token the sign-in call already returned.
         console.warn("[auth] getSession() failed, using the sign-in response token:", err?.message || err);
       }
-      const token = stored?.session?.access_token || data?.session?.access_token;
+      // let, not const: the 401 retry below may replace this with a refreshed token.
+      let token = stored?.session?.access_token || data?.session?.access_token;
       if (!token) {
         console.error("[auth] sign-in reported success but no session was stored", {
           hadResponseSession: Boolean(data?.session),
@@ -436,15 +449,52 @@
       // non-admin account would land on the dashboard shell and only discover it
       // is unwelcome when every panel failed to load.
       try {
-        const resp = await fetch("/api/admin/whoami", { headers: { Authorization: `Bearer ${token}` } });
+        let resp = await probeWhoami(token);
+
+        // A 401 here means the server would not accept a token Supabase had just
+        // issued. The one benign explanation is a stale/expired access token, so
+        // force a refresh and try once more before giving up. Anything else (a
+        // project mismatch, a bad service-role key) will fail again identically,
+        // and the server log names which.
+        if (resp.status === 401) {
+          console.warn("[auth] whoami returned 401 — refreshing the session and retrying once.");
+          const { data: refreshed, error: refreshError } = await adminSupabase.auth.refreshSession();
+          if (refreshError) {
+            console.error("[auth] refreshSession failed", {
+              name: refreshError?.name, status: refreshError?.status,
+              code: refreshError?.code, message: refreshError?.message,
+            });
+          }
+          const newToken = refreshed?.session?.access_token;
+          if (newToken && newToken !== token) {
+            resp = await probeWhoami(newToken);
+            if (resp.ok) token = newToken;   // carry the fresh token into the dashboard
+          }
+        }
+
         if (!resp.ok) {
           const body = await resp.json().catch(() => ({}));
           console.error("[auth] authorization probe rejected", {
             httpStatus: resp.status,
             error:      body?.error,
             message:    body?.message,
+            reason:     body?.reason,
           });
           await adminSupabase.auth.signOut();
+          if (resp.status === 401) {
+            // Survived a refresh, so this is not an expiry problem. The usual
+            // cause is the browser and the server pointing at different Supabase
+            // projects - the server log says so explicitly.
+            console.error(
+              "[auth] still 401 after refreshing. The server rejected a token Supabase just " +
+              "issued, so this is almost certainly a project mismatch: admin.js uses " +
+              `SUPABASE_URL "${SUPABASE_URL}", and the server's SUPABASE_URL / ` +
+              "SUPABASE_SERVICE_ROLE_KEY must name that SAME project. Check the server log " +
+              "for the [admin-auth] PROJECT MISMATCH line."
+            );
+            showError("האימות מול השרת נכשל. בדוק את הגדרות השרת.");
+            return;
+          }
           if (resp.status === 503) {
             // Server-side config fault, not a credential one - ADMIN_EMAILS is
             // unset (allowlist unconfigured) or Supabase env vars are missing.

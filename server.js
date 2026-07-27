@@ -468,6 +468,60 @@ function storageUnavailable(res) {
   return true;
 }
 
+/* Project ref of the Supabase instance this server verifies tokens against, e.g.
+   "abcdefgh" from https://abcdefgh.supabase.co. Used only to explain auth
+   failures - the actual verification is always getUser() against Supabase. */
+const SUPABASE_PROJECT_REF =
+  (String(process.env.SUPABASE_URL || "").match(/^https:\/\/([^.]+)\./) || [])[1] || "";
+
+/* Decode a JWT payload WITHOUT verifying it, for diagnostics only. Never used to
+   make an auth decision - getUser() above is the only thing trusted to do that.
+   Signature is deliberately not checked: the point is to describe a token that
+   verification has ALREADY rejected. */
+function describeJwt(token) {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(String(token).split(".")[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")
+    );
+    const iss = payload.iss || "";
+    return {
+      iss,
+      ref: (iss.match(/^https:\/\/([^.]+)\./) || [])[1] || payload.ref || "",
+      expired: typeof payload.exp === "number" ? payload.exp * 1000 < Date.now() : null,
+      expiresAt: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
+    };
+  } catch {
+    return { iss: "", ref: "", expired: null, expiresAt: null };
+  }
+}
+
+/* Boot-time consistency check. A service-role key from a different project than
+   SUPABASE_URL makes every getUser() fail with an opaque 401 at request time;
+   saying so at startup turns that into a one-line fix. Decodes the key's public
+   payload only - the secret is never logged. */
+(function verifyServerSupabaseConfig() {
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY || !SUPABASE_PROJECT_REF) return;
+  const info = describeJwt(process.env.SUPABASE_SERVICE_ROLE_KEY);
+  let role = "";
+  try {
+    role = JSON.parse(Buffer.from(
+      String(process.env.SUPABASE_SERVICE_ROLE_KEY).split(".")[1].replace(/-/g, "+").replace(/_/g, "/"),
+      "base64").toString("utf8")).role || "";
+  } catch { /* not a JWT - nothing useful to say */ }
+  if (info.ref && info.ref !== SUPABASE_PROJECT_REF) {
+    console.error(
+      `[supabase] CONFIG MISMATCH — SUPABASE_URL is project "${SUPABASE_PROJECT_REF}" but ` +
+      `SUPABASE_SERVICE_ROLE_KEY belongs to "${info.ref}". Admin auth will 401 on every request.`
+    );
+  }
+  if (role && role !== "service_role") {
+    console.error(
+      `[supabase] SUPABASE_SERVICE_ROLE_KEY has role "${role}", expected "service_role". ` +
+      "An anon key cannot verify other users' tokens."
+    );
+  }
+})();
+
 /* ── Admin auth middleware - verifies Supabase Auth JWT + admin allowlist ───────
    Two independent checks, both required:
      1. AUTHENTICATION - the Bearer token is a valid, unexpired Supabase Auth JWT
@@ -488,7 +542,36 @@ async function requireAdminAuth(req, res, next) {
   try {
     const { data: { user }, error } = await supabase.auth.getUser(token);
     if (error || !user) {
-      return res.status(401).json({ ok: false, error: "unauthorized", message: "Invalid or expired token." });
+      // Name the fault. A bare "invalid token" is indistinguishable between an
+      // expired session, a token minted by a DIFFERENT Supabase project, and a
+      // malformed header - and the project-mismatch case (browser hardcodes one
+      // project, server env points at another) rejects perfectly valid tokens.
+      const info = describeJwt(token);
+      console.error("[admin-auth] getUser rejected the token", {
+        supabaseError: error?.message || "(no user returned)",
+        status:        error?.status,
+        tokenIssuer:   info.iss || "(unparseable)",
+        serverProject: SUPABASE_PROJECT_REF || "(SUPABASE_URL unset)",
+        tokenProject:  info.ref || "(unparseable)",
+        expired:       info.expired,
+        expiresAt:     info.expiresAt,
+      });
+      if (info.ref && SUPABASE_PROJECT_REF && info.ref !== SUPABASE_PROJECT_REF) {
+        console.error(
+          `[admin-auth] PROJECT MISMATCH — this token was issued by Supabase project ` +
+          `"${info.ref}" but the server verifies against "${SUPABASE_PROJECT_REF}". ` +
+          `The browser's SUPABASE_URL in admin.js and the server's SUPABASE_URL / ` +
+          `SUPABASE_SERVICE_ROLE_KEY must point at the SAME project.`
+        );
+      } else if (info.expired) {
+        console.error("[admin-auth] token is expired — the client should refresh and retry.");
+      }
+      return res.status(401).json({
+        ok: false, error: "unauthorized", message: "Invalid or expired token.",
+        // Lets the client decide whether a refresh-and-retry is worth attempting.
+        // Says nothing an unauthenticated caller could not already determine.
+        reason: info.expired ? "token_expired" : "token_rejected",
+      });
     }
     const email = (user.email || "").toLowerCase();
     if (ADMIN_EMAILS.length === 0) {
