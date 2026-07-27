@@ -1007,97 +1007,311 @@ app.post("/api/admin/check-auth", authLimiter, (req, res) => {
   res.json({ allowed: true });
 });
 
-/* ── Password-reset request ────────────────────────────────────────────────────
-   Per-address cooldown, separate from the per-IP resetLimiter above. The IP
-   limiter stops one host hammering the endpoint; this stops a distributed set of
-   hosts (or one host behind rotating egress IPs) from flooding a single inbox.
+/* ═══════════════════════════════════════════════════════════════════════════
+   ADMIN PASSWORD RESET — server-owned 6-digit OTP, delivered via Resend.
 
-   Entries are recorded for EVERY syntactically valid address, allowlisted or
-   not. That is deliberate: if only allowlisted addresses were tracked, the
-   cooldown value in the response would differ between the two cases and would
-   itself become an allowlist oracle. Bounded + pruned so unrecognised addresses
-   cannot grow it without limit.                                                */
-const RESET_COOLDOWN_MS = 60_000;
-const RESET_COOLDOWN_MAX_ENTRIES = 500;
-const resetCooldown = new Map();   // email -> timestamp of last accepted request
+   Three steps, three endpoints:
+     POST /api/auth/request-reset    { email }                    → mails a code
+     POST /api/auth/verify-otp       { email, code }              → one-time ticket
+     POST /api/auth/reset-password   { email, ticket, password }  → sets password
 
-function resetCooldownRemainingMs(email) {
-  const last = resetCooldown.get(email);
-  if (!last) return 0;
-  const elapsed = Date.now() - last;
-  return elapsed >= RESET_COOLDOWN_MS ? 0 : RESET_COOLDOWN_MS - elapsed;
+   Why the middle step hands out a ticket instead of the final call replaying the
+   code: the OTP is consumed the instant it verifies, so a code that has been
+   presented once can never be presented again. The ticket that replaces it is
+   single-use, bound to the address it was issued for, and expires on the same
+   deadline the code had.
+
+   The code is never stored in the clear — only a SHA-256 of it — and comparison
+   is timing-safe, so neither a memory dump nor response timing hands an attacker
+   a shortcut past the 5-guess limit.
+
+   State is in-memory. A redeploy or a cold Vercel container drops pending resets
+   and the admin just requests a new code; that is the same tradeoff the visitor
+   OTP above already makes. Durable state would need Redis and is overkill for a
+   two-person allowlist.
+
+   NOTE: the allowlist rejection below is INTENTIONALLY explicit (403 + reason),
+   per the requirement for "a clear security response". That is an enumeration
+   oracle: anyone can learn whether an address is an admin. Accepted here because
+   the list is two addresses the operator already knows, and the clearer failure
+   is worth more operationally. Answer uniformly instead if that stops being true.
+   ═══════════════════════════════════════════════════════════════════════════ */
+const ADMIN_OTP_TTL_MS        = 10 * 60_000;  // code lifetime
+const ADMIN_TICKET_TTL_MS     = 10 * 60_000;  // post-verification window
+const ADMIN_RESET_COOLDOWN_MS = 60_000;       // between requests, per address
+const ADMIN_OTP_MAX_ATTEMPTS  = 5;            // wrong guesses before the code dies
+const ADMIN_RESET_MAX_ENTRIES = 200;          // bound on each map
+const ADMIN_PASSWORD_MIN_LEN  = 8;
+
+const adminOtpStore      = new Map();  // email  -> { hash, expires, attempts }
+const adminTicketStore   = new Map();  // ticket -> { email, expires }
+const adminResetCooldown = new Map();  // email  -> timestamp of last accepted request
+
+const sha256 = (v) => crypto.createHash("sha256").update(String(v), "utf8").digest("hex");
+
+/* Equal-length hex digests, so a timing-safe compare is meaningful here. */
+function hashesMatch(a, b) {
+  const ba = Buffer.from(String(a), "utf8");
+  const bb = Buffer.from(String(b), "utf8");
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
 }
 
-function noteResetRequest(email) {
+/* Drop expired entries, then hard-cap the map so a flood of distinct addresses
+   cannot grow it without bound. Maps iterate in insertion order, so the first
+   key is the oldest. */
+function pruneResetMap(map, max = ADMIN_RESET_MAX_ENTRIES) {
   const now = Date.now();
-  for (const [k, t] of resetCooldown) {
-    if (now - t >= RESET_COOLDOWN_MS) resetCooldown.delete(k);
+  for (const [k, v] of map) {
+    const deadline = typeof v === "number" ? v + ADMIN_RESET_COOLDOWN_MS : v?.expires;
+    if (deadline && now > deadline) map.delete(k);
   }
-  if (resetCooldown.size >= RESET_COOLDOWN_MAX_ENTRIES) {
-    // Evict oldest. Map preserves insertion order, and every entry is rewritten
-    // on each accepted request, so the first key is the least recently used.
-    const oldest = resetCooldown.keys().next().value;
-    if (oldest !== undefined) resetCooldown.delete(oldest);
+  while (map.size > max) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
   }
-  resetCooldown.set(email, now);
 }
 
-/* POST /api/admin/request-password-reset
-   Body: { email }
-   Always answers { ok: true, cooldownSeconds } with the same shape and status,
-   whether or not the address is allowlisted, exists, or is mid-cooldown. The
-   caller learns nothing about who is an admin; only an allowlisted address ever
-   causes Supabase to send anything. The UI copy is written to match ("if this
-   address is authorised, a code is on its way").
+function isResetAllowed(email) {
+  return PASSWORD_RESET_EMAILS.includes(email);
+}
 
-   Not constant-time: an allowlisted address awaits a Supabase round-trip, so
-   responses are measurably slower than a rejection. Closing that would mean
-   deferring the send past the response, which Vercel may kill once the function
-   returns. Rate limiting is the mitigation; the exposure is a timing oracle over
-   a two-address list whose members the operator already knows.                  */
-app.post("/api/admin/request-password-reset", resetLimiter, async (req, res) => {
+/* Shape check only. Runs before the allowlist so a malformed string is a 400
+   rather than a 403 — it says nothing about membership either way. */
+function validResetEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
+}
+
+/* Look up an Auth user by email. listUsers() is paginated and the admin API has
+   no get-by-email, so scan a bounded number of pages — the admin table here is
+   tiny, and the bound stops a large table turning this into a long request. */
+async function findSupabaseUserByEmail(email) {
+  const PER_PAGE = 200;
+  const MAX_PAGES = 10;
+  for (let page = 1; page <= MAX_PAGES; page += 1) {
+    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage: PER_PAGE });
+    if (error) throw new Error(error.message || "listUsers failed");
+    const users = data?.users || [];
+    const hit = users.find((u) => (u.email || "").toLowerCase() === email);
+    if (hit) return hit;
+    if (users.length < PER_PAGE) return null;
+  }
+  return null;
+}
+
+/* Resend delivery. Mirrors /api/send-otp above: same provider, same sender, same
+   env var. The key is read from process.env and never leaves the server —
+   nothing in admin.js or any other browser-delivered file references it. */
+async function sendResetEmail(email, code) {
+  if (!process.env.RESEND_API_KEY) throw new Error("RESEND_API_KEY not configured");
+  const minutes = Math.round(ADMIN_OTP_TTL_MS / 60_000);
+  const resp = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${process.env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: process.env.RESEND_FROM || "PEAR Admin <onboarding@resend.dev>",
+      to: email,
+      subject: `PEAR Admin — קוד איפוס סיסמה: ${code}`,
+      html: `
+        <div dir="rtl" style="font-family:sans-serif;max-width:420px;margin:0 auto;padding:32px;">
+          <h2 style="color:#000;margin:0 0 8px;">PEAR Admin</h2>
+          <p style="margin:0 0 20px;">קוד לאיפוס הסיסמה שלך:</p>
+          <div style="background:#f4f4f4;border-radius:8px;padding:24px;text-align:center;
+                      font-size:32px;font-weight:700;letter-spacing:8px;color:#000;">${code}</div>
+          <p style="color:#666;font-size:13px;margin-top:24px;">
+            הקוד תקף ל-${minutes} דקות וניתן לשימוש חד-פעמי.
+          </p>
+          <p style="color:#999;font-size:12px;margin-top:16px;">
+            אם לא ביקשת לאפס סיסמה, אפשר להתעלם מהודעה זו — לא בוצע שינוי.
+          </p>
+        </div>`,
+    }),
+  });
+  if (!resp.ok) {
+    // Resend's error body can echo the recipient; log the status only.
+    console.error(`[admin-reset] Resend responded ${resp.status}`);
+    throw new Error(`resend_${resp.status}`);
+  }
+}
+
+/* ── Step 1: request a code ───────────────────────────────────────────────── */
+app.post("/api/auth/request-reset", resetLimiter, async (req, res) => {
   const email = String(req.body?.email || "").toLowerCase().trim();
 
-  // Shape check only — never reveals allowlist membership.
-  const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
-  if (!looksLikeEmail) {
-    return res.status(400).json({ ok: false, error: "invalid_email" });
+  if (!validResetEmail(email)) {
+    return res.status(400).json({ ok: false, error: "invalid_email", message: "כתובת אימייל לא תקינה." });
+  }
+  if (!isResetAllowed(email)) {
+    console.warn("[admin-reset] blocked: address not on the reset allowlist");
+    return res.status(403).json({
+      ok: false,
+      error: "not_authorized",
+      message: "כתובת זו אינה מורשית לאיפוס סיסמה.",
+    });
   }
 
-  const remaining = resetCooldownRemainingMs(email);
-  if (remaining > 0) {
-    return res.json({ ok: true, cooldownSeconds: Math.ceil(remaining / 1000) });
+  pruneResetMap(adminResetCooldown);
+  const last = adminResetCooldown.get(email);
+  if (last && Date.now() - last < ADMIN_RESET_COOLDOWN_MS) {
+    const retryAfter = Math.ceil((ADMIN_RESET_COOLDOWN_MS - (Date.now() - last)) / 1000);
+    return res.status(429).json({
+      ok: false, error: "cooldown", retryAfter,
+      message: `נא להמתין ${retryAfter} שניות לפני בקשת קוד נוסף.`,
+    });
   }
-  noteResetRequest(email);
 
-  const allowed = PASSWORD_RESET_EMAILS.includes(email);
-  // Log the DECISION, never the address of a rejected attempt — access logs are
-  // a lower-trust surface than this endpoint and would otherwise accumulate a
-  // list of addresses that probed it.
-  console.log(`[admin-reset] request accepted=${allowed}`);
+  // crypto.randomInt, not Math.random: this code is a credential, and Math.random
+  // is not a CSPRNG — its output is predictable from prior draws.
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
 
-  if (allowed) {
-    if (!supabase) {
-      // Misconfiguration, not a client error. Still answer uniformly so a broken
-      // deploy does not become a way to enumerate the allowlist.
-      console.error("[admin-reset] Supabase client unavailable — no email sent. " +
-                    "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
-    } else {
-      const proto = (req.headers["x-forwarded-proto"] || req.protocol || "https")
-        .split(",")[0].trim();
-      const host  = (req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
-      const redirectTo = host ? `${proto}://${host}/` : undefined;
-      try {
-        const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
-        // Status/name only — the body can carry user metadata.
-        if (error) console.warn("[admin-reset] send failed:", error?.status || "", error?.name || "error");
-      } catch (err) {
-        console.warn("[admin-reset] send threw:", err?.message || err);
-      }
+  try {
+    await sendResetEmail(email, code);
+  } catch (err) {
+    console.error("[admin-reset] send failed:", err?.message || err);
+    return res.status(502).json({
+      ok: false, error: "send_failed",
+      message: "שליחת הקוד נכשלה. נסה שוב מאוחר יותר.",
+    });
+  }
+
+  // Recorded only after a successful send, so a provider outage does not lock the
+  // admin behind a cooldown for a code that never arrived.
+  adminOtpStore.set(email, { hash: sha256(code), expires: Date.now() + ADMIN_OTP_TTL_MS, attempts: 0 });
+  adminResetCooldown.set(email, Date.now());
+  pruneResetMap(adminOtpStore);
+
+  console.log("[admin-reset] code sent to an allowlisted address");
+  res.json({
+    ok: true,
+    cooldownSeconds: Math.ceil(ADMIN_RESET_COOLDOWN_MS / 1000),
+    expiresInMinutes: Math.round(ADMIN_OTP_TTL_MS / 60_000),
+  });
+});
+
+/* ── Step 2: verify the code, exchange it for a single-use ticket ─────────── */
+app.post("/api/auth/verify-otp", resetLimiter, (req, res) => {
+  const email = String(req.body?.email || "").toLowerCase().trim();
+  const code  = String(req.body?.code  || "").trim();
+
+  if (!validResetEmail(email) || !/^\d{4,10}$/.test(code)) {
+    return res.status(400).json({ ok: false, error: "invalid_input", message: "קוד לא תקין." });
+  }
+  if (!isResetAllowed(email)) {
+    return res.status(403).json({ ok: false, error: "not_authorized", message: "כתובת זו אינה מורשית." });
+  }
+
+  pruneResetMap(adminOtpStore);
+  const rec = adminOtpStore.get(email);
+  if (!rec || Date.now() > rec.expires) {
+    adminOtpStore.delete(email);
+    return res.status(400).json({ ok: false, error: "expired", message: "הקוד פג תוקף. בקש קוד חדש." });
+  }
+
+  if (!hashesMatch(rec.hash, sha256(code))) {
+    rec.attempts += 1;
+    // Burn the code after too many wrong guesses so an attacker cannot grind the
+    // 6-digit space inside the 10-minute window.
+    if (rec.attempts >= ADMIN_OTP_MAX_ATTEMPTS) {
+      adminOtpStore.delete(email);
+      return res.status(429).json({
+        ok: false, error: "too_many_attempts",
+        message: "יותר מדי ניסיונות. בקש קוד חדש.",
+      });
     }
+    return res.status(400).json({
+      ok: false, error: "invalid", message: "הקוד שגוי.",
+      attemptsLeft: ADMIN_OTP_MAX_ATTEMPTS - rec.attempts,
+    });
   }
 
-  res.json({ ok: true, cooldownSeconds: Math.ceil(RESET_COOLDOWN_MS / 1000) });
+  // Single use: the code dies here, whatever happens next.
+  adminOtpStore.delete(email);
+
+  const ticket = crypto.randomBytes(32).toString("hex");
+  adminTicketStore.set(ticket, { email, expires: Date.now() + ADMIN_TICKET_TTL_MS });
+  pruneResetMap(adminTicketStore);
+
+  res.json({ ok: true, ticket });
+});
+
+/* ── Step 3: consume the ticket and set the new password ──────────────────── */
+app.post("/api/auth/reset-password", resetLimiter, async (req, res) => {
+  const email    = String(req.body?.email  || "").toLowerCase().trim();
+  const ticket   = String(req.body?.ticket || "").trim();
+  const password = String(req.body?.password || "");
+
+  if (!validResetEmail(email) || !ticket) {
+    return res.status(400).json({ ok: false, error: "invalid_input", message: "בקשה לא תקינה." });
+  }
+  if (!isResetAllowed(email)) {
+    return res.status(403).json({ ok: false, error: "not_authorized", message: "כתובת זו אינה מורשית." });
+  }
+
+  pruneResetMap(adminTicketStore);
+  const rec = adminTicketStore.get(ticket);
+
+  // Expired: drop it on the way past, it can never be useful again.
+  if (rec && Date.now() > rec.expires) {
+    adminTicketStore.delete(ticket);
+    return res.status(400).json({ ok: false, error: "invalid_ticket", message: "האימות פג תוקף. התחל מחדש." });
+  }
+  // Bound to the issuing address: a ticket minted for one admin cannot be
+  // redirected at another's account. Deliberately does NOT delete on mismatch —
+  // otherwise anyone holding a ticket could burn the rightful owner's reset by
+  // replaying it against the wrong address. Only a correct redemption, or the
+  // clock, retires a ticket.
+  if (!rec || rec.email !== email) {
+    return res.status(400).json({ ok: false, error: "invalid_ticket", message: "האימות פג תוקף. התחל מחדש." });
+  }
+
+  if (password.length < ADMIN_PASSWORD_MIN_LEN) {
+    return res.status(400).json({
+      ok: false, error: "weak_password",
+      message: `הסיסמה חייבת להכיל לפחות ${ADMIN_PASSWORD_MIN_LEN} תווים.`,
+    });
+  }
+  if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+    return res.status(400).json({
+      ok: false, error: "weak_password",
+      message: "הסיסמה חייבת להכיל אותיות וספרות.",
+    });
+  }
+
+  if (!supabase) {
+    console.error("[admin-reset] Supabase unavailable — set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
+    return res.status(503).json({
+      ok: false, error: "auth_store_unavailable",
+      message: "שירות האימות אינו זמין כעת.",
+    });
+  }
+
+  try {
+    const user = await findSupabaseUserByEmail(email);
+    if (!user) {
+      console.error("[admin-reset] allowlisted address has no matching Supabase user");
+      return res.status(404).json({ ok: false, error: "user_not_found", message: "לא נמצא משתמש תואם." });
+    }
+    const { error } = await supabase.auth.admin.updateUserById(user.id, { password });
+    if (error) {
+      console.error("[admin-reset] password update failed:", error?.status || "", error?.name || "error");
+      return res.status(502).json({ ok: false, error: "update_failed", message: "עדכון הסיסמה נכשל." });
+    }
+  } catch (err) {
+    console.error("[admin-reset] password update threw:", err?.message || err);
+    return res.status(502).json({ ok: false, error: "update_failed", message: "עדכון הסיסמה נכשל." });
+  }
+
+  // Ticket is single-use; drop it plus any code and cooldown still held here.
+  adminTicketStore.delete(ticket);
+  adminOtpStore.delete(email);
+  adminResetCooldown.delete(email);
+
+  console.log("[admin-reset] password updated for an allowlisted address");
+  res.json({ ok: true });
 });
 
 /* ── In-memory image cache - avoids re-fetching the same CDN image within a warm

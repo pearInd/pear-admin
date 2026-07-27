@@ -36,30 +36,36 @@
      ORDER as ADMIN_EMAILS - index i in ADMIN_EMAILS pairs with index i in
      ADMIN_PASSWORDS (the server enforces both - see server.js).
    -----------------------------------------------------------------------------
-   FORGOT PASSWORD - additional one-time setup, REQUIRED or the flow cannot work:
+   FORGOT PASSWORD - does NOT use Supabase's recovery email. The OTP is generated,
+   stored and checked by our own server, mailed through Resend, and the password
+   is written with the Supabase admin API. See the ADMIN PASSWORD RESET block in
+   server.js. Nothing in this file ever sees the Resend key.
 
-     5. Put the 6-digit code in the recovery email:
-        Supabase Dashboard → Authentication → Email Templates → Reset Password
-        The stock template only contains a {{ .ConfirmationURL }} link. This flow
-        asks the admin to TYPE a code, so the template must also render the
-        token itself - add {{ .Token }} to the template body. Without it the
-        email arrives with nothing the admin can type, and verifyOtp() below has
-        no code to check. (The link keeps working too: clicking it fires
-        PASSWORD_RECOVERY, which init() routes straight to the password step.)
+   Setup required for it to work:
 
-     6. Server env: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY must be set, or
-        lib/supabase.js exports null and POST /api/admin/request-password-reset
-        silently sends nothing (it logs, and still answers uniformly so a broken
-        deploy is not an allowlist oracle).
+     5. Server env: RESEND_API_KEY (transactional email) plus SUPABASE_URL and
+        SUPABASE_SERVICE_ROLE_KEY (the admin API writes the new password). Set
+        all three in .env locally AND in the Vercel project - without the
+        Supabase pair, step 3 returns 503 and no password changes.
 
-     7. Password policy: updateUser({ password }) is a direct browser→Supabase
-        call, so no server of ours can enforce strength on it. The client checks
-        in passwordProblem() are UX. Set the binding rule at
-        Authentication → Policies → Password Requirements (min 8, letters +
-        digits) so it matches what this UI promises.
+     6. Resend sender: the default from-address is onboarding@resend.dev, which
+        Resend only delivers to the address that owns the Resend account. To mail
+        both allowlisted admins, verify a domain at resend.com/domains and set
+        RESEND_FROM to an address on it.
 
-     8. Every address in PASSWORD_RESET_EMAILS must exist under
-        Authentication → Users. Recovery only ever mails an existing user.
+     7. Every address in PASSWORD_RESET_EMAILS must exist under Supabase →
+        Authentication → Users, or step 3 has no account to update (404).
+
+     8. Password rules are enforced SERVER-side in /api/auth/reset-password (min
+        8, letters + digits). passwordProblem() below repeats them only so the
+        admin gets the message without a round-trip.
+
+   IMPORTANT - this reset does not currently change what the login form checks.
+   Sign-in verifies email+password against ADMIN_EMAILS / ADMIN_PASSWORDS (env
+   vars, see /api/admin/check-auth) and then sends a magic link; the Supabase
+   account password is not consulted anywhere in that path. So a completed reset
+   updates a credential the login gate ignores. To connect them, sign-in has to
+   move to adminSupabase.auth.signInWithPassword() - see the summary notes.
    ============================================================================= */
 (() => {
   "use strict";
@@ -73,18 +79,18 @@
      Mirror of PASSWORD_RESET_EMAILS in server.js, kept here purely so a typo or a
      non-admin address fails instantly instead of after a round-trip. It is NOT
      the security control: everything in this file is editable from devtools. The
-     control is the identical check in POST /api/admin/request-password-reset,
-     which is what actually decides whether Supabase sends anything. If you change
-     one list, change the other — but the server's copy is the one that binds.  */
+     control is the identical check in POST /api/auth/request-reset, which is what
+     actually decides whether Resend is ever called. If you change one list,
+     change the other — but the server's copy is the one that binds.            */
   const RESET_ALLOWED_EMAILS = ["grtnryyr@gmail.com", "itaiarazi99@gmail.com"];
 
   const RESET_COOLDOWN_SECONDS = 60;
   const PASSWORD_MIN_LENGTH    = 8;
 
-  /* verifyOtp({ type: "recovery" }) signs the browser in as a side effect, which
-     trips onAuthStateChange → SIGNED_IN → showDashboard() and would tear the
-     reset view out from under the admin before they ever set a password. This
-     flag suppresses that one transition for the duration of the flow. */
+  /* True while the reset view is on screen. onAuthStateChange → SIGNED_IN →
+     showDashboard() would otherwise tear that view out from under the admin
+     mid-flow if a background token refresh fired, leaving the password
+     unchanged. Also guards the getSession() check in init(). */
   let recoveryInProgress = false;
 
   /* Module-scope HTML escaper. startDashboard() has its own esc(), but it is
@@ -402,14 +408,15 @@
   }
 
   /* ── Reset-password flow ─────────────────────────────────────────────────────
-     1. email    → POST /api/admin/request-password-reset (server decides whether
-                   to send; the response is identical either way, so this step
-                   always advances to the code entry)
-     2. code     → verifyOtp({ type: "recovery" }) establishes a recovery session
-     3. password → updateUser({ password }), then signOut() so the recovery
-                   session cannot be reused and the admin re-authenticates
-                   normally through the login screen.                            */
-  function showReset(prefillEmail, { startAtPassword = false } = {}) {
+     Every step is a call to our own server; the browser never talks to Resend and
+     never holds a recovery session.
+     1. email    → POST /api/auth/request-reset    server checks the allowlist,
+                   then mails a 6-digit code (403 if the address is not on it)
+     2. code     → POST /api/auth/verify-otp       consumes the code, returns a
+                   single-use ticket
+     3. password → POST /api/auth/reset-password   spends the ticket and writes
+                   the password via the Supabase admin API, then back to login. */
+  function showReset(prefillEmail) {
     document.getElementById("app").innerHTML = resetMarkup(prefillEmail);
     recoveryInProgress = true;
 
@@ -426,16 +433,10 @@
     let step = "email";
     let email = prefillEmail || "";
     let countdownTimer = null;
-
-    /* Arrived on an already-established recovery session (clicked the emailed
-       link rather than typing the code). The code step is already satisfied -
-       jump straight to choosing a password, or the admin would be asked to
-       request a second code they do not need. */
-    if (startAtPassword) {
-      step = "password";
-      stepEmail.hidden = true;
-      stepPass.hidden = false;
-    }
+    /* Issued by /api/auth/verify-otp once the code checks out, and the only
+       thing that authorises step 3. Held in a closure, never in localStorage or
+       a cookie - it should not outlive this view. */
+    let resetTicket = "";
 
     function showError(msg) {
       successMsg.hidden = true;
@@ -469,22 +470,35 @@
       }, 1000);
     }
 
-    async function requestCode(addr) {
-      // Client-side allowlist: instant feedback only. The server repeats this
-      // check and is the one that decides whether an email is actually sent.
-      if (!RESET_ALLOWED_EMAILS.includes(addr.toLowerCase())) {
-        // Same wording as the success path so this UI does not become the
-        // allowlist oracle that the server endpoint deliberately refuses to be.
-        return { cooldownSeconds: RESET_COOLDOWN_SECONDS };
-      }
-      const resp = await fetch("/api/admin/request-password-reset", {
+    /* POST helper. Returns { status, body } and never throws on a non-2xx, so
+       each step can surface the server's own message rather than a generic one. */
+    async function postJson(url, payload) {
+      const resp = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: addr }),
+        body: JSON.stringify(payload),
       });
-      if (!resp.ok) throw new Error("request_failed");
       const body = await resp.json().catch(() => ({}));
-      return { cooldownSeconds: body.cooldownSeconds || RESET_COOLDOWN_SECONDS };
+      return { status: resp.status, body };
+    }
+
+    async function requestCode(addr) {
+      // Client-side allowlist: instant feedback only, and it mirrors the server's
+      // explicit rejection rather than faking success. The binding check is the
+      // identical one in POST /api/auth/request-reset - that is what decides
+      // whether Resend is ever called, and it cannot be edited from devtools.
+      if (!RESET_ALLOWED_EMAILS.includes(addr.toLowerCase())) {
+        return { ok: false, message: "כתובת זו אינה מורשית לאיפוס סיסמה." };
+      }
+      const { status, body } = await postJson("/api/auth/request-reset", { email: addr });
+      if (status === 200 && body.ok) {
+        return { ok: true, cooldownSeconds: body.cooldownSeconds || RESET_COOLDOWN_SECONDS };
+      }
+      return {
+        ok: false,
+        message: body.message || "שגיאה בשליחת הקוד, נסה שוב",
+        cooldownSeconds: body.retryAfter,
+      };
     }
 
     form.addEventListener("submit", async (e) => {
@@ -498,12 +512,19 @@
         if (!addr) return showError("יש להזין כתובת אימייל");
         setBusy(btn, true, "שלח קוד איפוס");
         try {
-          const { cooldownSeconds } = await requestCode(addr);
+          const result = await requestCode(addr);
+          if (!result.ok) {
+            // Blocked (not allowlisted), cooling down, or the send failed. Stay
+            // on this step so the address can be corrected.
+            showError(result.message);
+            if (result.cooldownSeconds) startCooldown(result.cooldownSeconds);
+            return;
+          }
           email = addr;
           step = "code";
           stepEmail.hidden = true;
           stepCode.hidden = false;
-          startCooldown(cooldownSeconds);
+          startCooldown(result.cooldownSeconds);
           $("resetCode").focus();
         } catch (err) {
           console.warn("[reset] request failed:", err?.message || err);
@@ -520,13 +541,20 @@
         const token = $("resetCode").value.trim();
         if (!token) return showError("יש להזין את הקוד שנשלח");
         setBusy(btn, true, "אמת קוד");
-        const { error } = await adminSupabase.auth.verifyOtp({ email, token, type: "recovery" });
+        const { status, body } = await postJson("/api/auth/verify-otp", { email, code: token });
         setBusy(btn, false, "אמת קוד");
-        if (error) {
-          console.warn("[reset] verify failed:", error?.status || "", error?.name || "error");
-          showError("הקוד שגוי או פג תוקפו");
+        if (status !== 200 || !body.ok) {
+          console.warn("[reset] verify rejected:", status, body?.error || "");
+          // attemptsLeft is only present on a wrong-code response; the server
+          // omits it once the code has been burned.
+          const extra = typeof body?.attemptsLeft === "number"
+            ? ` (${body.attemptsLeft} ניסיונות נותרו)` : "";
+          showError((body?.message || "הקוד שגוי או פג תוקפו") + extra);
           return;
         }
+        // Server consumed the code and issued a single-use ticket. Everything
+        // after this point authenticates with the ticket, never the code.
+        resetTicket = body.ticket;
         step = "password";
         stepCode.hidden = true;
         stepPass.hidden = false;
@@ -544,11 +572,13 @@
         if (problem) return showError(problem);
 
         setBusy(btn, true, "עדכן סיסמה");
-        const { error } = await adminSupabase.auth.updateUser({ password: pw });
-        if (error) {
-          console.warn("[reset] update failed:", error?.status || "", error?.name || "error");
+        const { status, body } = await postJson("/api/auth/reset-password", {
+          email, ticket: resetTicket, password: pw,
+        });
+        if (status !== 200 || !body.ok) {
+          console.warn("[reset] update rejected:", status, body?.error || "");
           setBusy(btn, false, "עדכן סיסמה");
-          showError("עדכון הסיסמה נכשל, נסה שוב");
+          showError(body?.message || "עדכון הסיסמה נכשל, נסה שוב");
           return;
         }
 
@@ -567,8 +597,13 @@
       clearError();
       resendBtn.disabled = true;
       try {
-        const { cooldownSeconds } = await requestCode(email);
-        startCooldown(cooldownSeconds);
+        const result = await requestCode(email);
+        if (!result.ok) {
+          showError(result.message);
+          if (result.cooldownSeconds) startCooldown(result.cooldownSeconds);
+          return;
+        }
+        startCooldown(result.cooldownSeconds);
       } catch (err) {
         console.warn("[reset] resend failed:", err?.message || err);
         showError("שגיאה בשליחת הקוד, נסה שוב");
@@ -581,12 +616,14 @@
       clearInterval(countdownTimer);
       recoveryInProgress = false;
       email = "";
+      // Drop the ticket on the way out. The server expires it independently, but
+      // leaving it in a closure that outlives the view serves no purpose.
+      resetTicket = "";
     }
 
-    $("resetBackBtn").addEventListener("click", async () => {
-      // Abandoning mid-flow can leave a verified recovery session behind; clear
-      // it so backing out never yields a logged-in dashboard.
-      if (step === "password") await adminSupabase.auth.signOut();
+    $("resetBackBtn").addEventListener("click", () => {
+      // No session to tear down - this flow never mints one. Dropping the ticket
+      // (in cleanup) is what matters; the server expires it regardless.
       cleanup();
       showLogin();
     });
@@ -977,16 +1014,11 @@
     // Magic-link return: when the admin clicks the emailed link, Supabase
     // restores the session on page load and fires SIGNED_IN - load the dashboard.
     adminSupabase.auth.onAuthStateChange((event, session) => {
-      // PASSWORD_RECOVERY arrives when Supabase restores a session from a
-      // recovery link. Never a dashboard hand-off - route it into the reset
-      // flow so the admin lands on "choose a new password", not on the data.
-      if (event === "PASSWORD_RECOVERY") {
-        showReset(session?.user?.email || "", { startAtPassword: true });
-        return;
-      }
-      // verifyOtp() in the reset flow also emits SIGNED_IN. Honouring it would
-      // replace the half-finished reset view with the dashboard and leave the
-      // password unchanged, so suppress it while a reset is in progress.
+      // The reset flow is entirely server-side now (Resend OTP + Supabase admin
+      // API), so it never mints a browser session and PASSWORD_RECOVERY no
+      // longer fires. recoveryInProgress still matters: a background token
+      // refresh can emit SIGNED_IN mid-reset, and honouring it would swap the
+      // half-finished reset view for the dashboard.
       if (event === "SIGNED_IN" && session && !recoveryInProgress) {
         showDashboard(session.access_token);
       }
