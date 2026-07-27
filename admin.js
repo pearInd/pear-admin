@@ -35,6 +35,31 @@
      env var. Also set ADMIN_PASSWORDS with one password per email, in the SAME
      ORDER as ADMIN_EMAILS - index i in ADMIN_EMAILS pairs with index i in
      ADMIN_PASSWORDS (the server enforces both - see server.js).
+   -----------------------------------------------------------------------------
+   FORGOT PASSWORD - additional one-time setup, REQUIRED or the flow cannot work:
+
+     5. Put the 6-digit code in the recovery email:
+        Supabase Dashboard → Authentication → Email Templates → Reset Password
+        The stock template only contains a {{ .ConfirmationURL }} link. This flow
+        asks the admin to TYPE a code, so the template must also render the
+        token itself - add {{ .Token }} to the template body. Without it the
+        email arrives with nothing the admin can type, and verifyOtp() below has
+        no code to check. (The link keeps working too: clicking it fires
+        PASSWORD_RECOVERY, which init() routes straight to the password step.)
+
+     6. Server env: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY must be set, or
+        lib/supabase.js exports null and POST /api/admin/request-password-reset
+        silently sends nothing (it logs, and still answers uniformly so a broken
+        deploy is not an allowlist oracle).
+
+     7. Password policy: updateUser({ password }) is a direct browser→Supabase
+        call, so no server of ours can enforce strength on it. The client checks
+        in passwordProblem() are UX. Set the binding rule at
+        Authentication → Policies → Password Requirements (min 8, letters +
+        digits) so it matches what this UI promises.
+
+     8. Every address in PASSWORD_RESET_EMAILS must exist under
+        Authentication → Users. Recovery only ever mails an existing user.
    ============================================================================= */
 (() => {
   "use strict";
@@ -43,6 +68,48 @@
   const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5oa2FpdWNiYWF1cWV0YWlkZ29pIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4MTQ2NzIsImV4cCI6MjA5ODM5MDY3Mn0.t6uZbCmQUoeNdz1XkH1ZxwrcIcy7bxmvzezGcSUOLDU"; // Supabase Dashboard → Settings → API → anon public
 
   const adminSupabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  /* ── Password reset ───────────────────────────────────────────────────────────
+     Mirror of PASSWORD_RESET_EMAILS in server.js, kept here purely so a typo or a
+     non-admin address fails instantly instead of after a round-trip. It is NOT
+     the security control: everything in this file is editable from devtools. The
+     control is the identical check in POST /api/admin/request-password-reset,
+     which is what actually decides whether Supabase sends anything. If you change
+     one list, change the other — but the server's copy is the one that binds.  */
+  const RESET_ALLOWED_EMAILS = ["grtnryyr@gmail.com", "itaiarazi99@gmail.com"];
+
+  const RESET_COOLDOWN_SECONDS = 60;
+  const PASSWORD_MIN_LENGTH    = 8;
+
+  /* verifyOtp({ type: "recovery" }) signs the browser in as a side effect, which
+     trips onAuthStateChange → SIGNED_IN → showDashboard() and would tear the
+     reset view out from under the admin before they ever set a password. This
+     flag suppresses that one transition for the duration of the flow. */
+  let recoveryInProgress = false;
+
+  /* Module-scope HTML escaper. startDashboard() has its own esc(), but it is
+     nested in that function and unreachable from the login/reset markup
+     builders. Needed because the reset view interpolates a user-typed address
+     into a value="" attribute - unescaped, a quote in that string would break
+     out of the attribute and inject markup. */
+  function escHtml(v) {
+    return String(v ?? "")
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  /* Strong-password policy: length + at least one letter and one digit. Enforced
+     here for immediate feedback, and again by Supabase (Dashboard → Authentication
+     → Policies → Password Requirements) which is the copy that cannot be edited
+     away in devtools. updateUser() is a direct client→Supabase call, so there is
+     no server hop of ours to enforce it in — set the dashboard policy to match. */
+  function passwordProblem(pw, confirmPw) {
+    if (pw.length < PASSWORD_MIN_LENGTH) return `הסיסמה חייבת להכיל לפחות ${PASSWORD_MIN_LENGTH} תווים`;
+    if (!/[A-Za-z]/.test(pw))            return "הסיסמה חייבת להכיל לפחות אות אחת";
+    if (!/[0-9]/.test(pw))               return "הסיסמה חייבת להכיל לפחות ספרה אחת";
+    if (pw !== confirmPw)                return "הסיסמאות אינן תואמות";
+    return null;
+  }
 
   /* ── Login view markup - single screen, magic-link ──────────────────────────
      One card: email field + כניסה עם קישור לאימייל button. After signInWithOtp succeeds a
@@ -67,6 +134,7 @@
           <p id="emailError" class="login-error" hidden></p>
           <button type="submit" id="sendCodeBtn" class="dash-btn login-submit">כניסה עם קישור לאימייל</button>
           <p id="loginSent" class="login-hint" hidden>נשלח לך קישור לאימייל שלך. לחץ על הקישור כדי להיכנס.</p>
+          <button type="button" id="forgotPasswordBtn" class="login-back">שכחת סיסמה?</button>
         </form>
       </div>
     </div>`;
@@ -270,6 +338,257 @@
       sendCodeBtn.disabled = false;
       sendCodeBtn.textContent = "כניסה עם קישור לאימייל";
       sentMsg.hidden = false;
+    });
+
+    document.getElementById("forgotPasswordBtn")
+      .addEventListener("click", () => showReset(emailInput.value.trim()));
+  }
+
+  /* ── Reset-password view markup - three steps in one card ────────────────────
+     Steps are sections in a single card, toggled with [hidden], so the flow never
+     loses the card chrome between stages. Step order: email → emailed code →
+     new password twice. */
+  function resetMarkup(prefillEmail) {
+    return `
+    <div id="resetView" class="login-view">
+      <div class="login-card">
+        <div class="login-brand">PEAR</div>
+        <p class="login-subtitle">איפוס סיסמה</p>
+
+        <form id="resetForm" autocomplete="off" novalidate>
+
+          <section id="resetStepEmail">
+            <div class="login-field">
+              <label for="resetEmail">אימייל</label>
+              <input id="resetEmail" type="email" autocomplete="username" required
+                     placeholder="admin@example.com" dir="ltr" value="${escHtml(prefillEmail)}">
+            </div>
+            <button type="submit" id="resetSubmitBtn" class="dash-btn login-submit">שלח קוד איפוס</button>
+          </section>
+
+          <section id="resetStepCode" hidden>
+            <p class="login-hint">אם הכתובת מורשית, נשלח אליה קוד בן 6 ספרות.</p>
+            <div class="login-field">
+              <label for="resetCode">קוד איפוס</label>
+              <input id="resetCode" type="text" inputmode="numeric" autocomplete="one-time-code"
+                     maxlength="10" placeholder="123456" dir="ltr">
+            </div>
+            <button type="submit" id="resetVerifyBtn" class="dash-btn login-submit">אמת קוד</button>
+            <p id="resetCountdown" class="login-countdown" hidden></p>
+            <button type="button" id="resetResendBtn" class="login-back" hidden>שלח קוד חדש</button>
+          </section>
+
+          <section id="resetStepPassword" hidden>
+            <p class="login-hint">בחר סיסמה חדשה - לפחות ${PASSWORD_MIN_LENGTH} תווים, אותיות וספרות.</p>
+            <div class="login-field">
+              <label for="resetNewPassword">סיסמה חדשה</label>
+              <input id="resetNewPassword" type="password" autocomplete="new-password"
+                     placeholder="••••••••" dir="ltr">
+            </div>
+            <div class="login-field">
+              <label for="resetConfirmPassword">אימות סיסמה</label>
+              <input id="resetConfirmPassword" type="password" autocomplete="new-password"
+                     placeholder="••••••••" dir="ltr">
+            </div>
+            <button type="submit" id="resetSaveBtn" class="dash-btn login-submit">עדכן סיסמה</button>
+          </section>
+
+          <p id="resetError"   class="login-error" hidden></p>
+          <p id="resetSuccess" class="login-hint"  hidden>הסיסמה עודכנה. מעביר אותך למסך ההתחברות...</p>
+          <button type="button" id="resetBackBtn" class="login-back">חזרה להתחברות</button>
+        </form>
+      </div>
+    </div>`;
+  }
+
+  /* ── Reset-password flow ─────────────────────────────────────────────────────
+     1. email    → POST /api/admin/request-password-reset (server decides whether
+                   to send; the response is identical either way, so this step
+                   always advances to the code entry)
+     2. code     → verifyOtp({ type: "recovery" }) establishes a recovery session
+     3. password → updateUser({ password }), then signOut() so the recovery
+                   session cannot be reused and the admin re-authenticates
+                   normally through the login screen.                            */
+  function showReset(prefillEmail, { startAtPassword = false } = {}) {
+    document.getElementById("app").innerHTML = resetMarkup(prefillEmail);
+    recoveryInProgress = true;
+
+    const $ = (id) => document.getElementById(id);
+    const form        = $("resetForm");
+    const stepEmail   = $("resetStepEmail");
+    const stepCode    = $("resetStepCode");
+    const stepPass    = $("resetStepPassword");
+    const errorMsg    = $("resetError");
+    const successMsg  = $("resetSuccess");
+    const countdownEl = $("resetCountdown");
+    const resendBtn   = $("resetResendBtn");
+
+    let step = "email";
+    let email = prefillEmail || "";
+    let countdownTimer = null;
+
+    /* Arrived on an already-established recovery session (clicked the emailed
+       link rather than typing the code). The code step is already satisfied -
+       jump straight to choosing a password, or the admin would be asked to
+       request a second code they do not need. */
+    if (startAtPassword) {
+      step = "password";
+      stepEmail.hidden = true;
+      stepPass.hidden = false;
+    }
+
+    function showError(msg) {
+      successMsg.hidden = true;
+      errorMsg.textContent = msg;
+      errorMsg.hidden = false;
+    }
+    function clearError() { errorMsg.hidden = true; }
+
+    function setBusy(btn, busy, label) {
+      btn.disabled = busy;
+      btn.textContent = busy ? "..." : label;
+    }
+
+    /* 60s resend cooldown. Mirrors the per-address cooldown the server enforces -
+       this one only keeps the button honest, the server's is the real brake. */
+    function startCooldown(seconds) {
+      clearInterval(countdownTimer);
+      let left = seconds;
+      resendBtn.hidden = true;
+      countdownEl.hidden = false;
+      countdownEl.textContent = `ניתן לשלוח קוד חדש בעוד ${left} שניות`;
+      countdownTimer = setInterval(() => {
+        left -= 1;
+        if (left <= 0) {
+          clearInterval(countdownTimer);
+          countdownEl.hidden = true;
+          resendBtn.hidden = false;
+          return;
+        }
+        countdownEl.textContent = `ניתן לשלוח קוד חדש בעוד ${left} שניות`;
+      }, 1000);
+    }
+
+    async function requestCode(addr) {
+      // Client-side allowlist: instant feedback only. The server repeats this
+      // check and is the one that decides whether an email is actually sent.
+      if (!RESET_ALLOWED_EMAILS.includes(addr.toLowerCase())) {
+        // Same wording as the success path so this UI does not become the
+        // allowlist oracle that the server endpoint deliberately refuses to be.
+        return { cooldownSeconds: RESET_COOLDOWN_SECONDS };
+      }
+      const resp = await fetch("/api/admin/request-password-reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: addr }),
+      });
+      if (!resp.ok) throw new Error("request_failed");
+      const body = await resp.json().catch(() => ({}));
+      return { cooldownSeconds: body.cooldownSeconds || RESET_COOLDOWN_SECONDS };
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      clearError();
+
+      /* Step 1 - ask the server to send a code. */
+      if (step === "email") {
+        const btn = $("resetSubmitBtn");
+        const addr = $("resetEmail").value.trim();
+        if (!addr) return showError("יש להזין כתובת אימייל");
+        setBusy(btn, true, "שלח קוד איפוס");
+        try {
+          const { cooldownSeconds } = await requestCode(addr);
+          email = addr;
+          step = "code";
+          stepEmail.hidden = true;
+          stepCode.hidden = false;
+          startCooldown(cooldownSeconds);
+          $("resetCode").focus();
+        } catch (err) {
+          console.warn("[reset] request failed:", err?.message || err);
+          showError("שגיאה בשליחת הקוד, נסה שוב");
+        } finally {
+          setBusy(btn, false, "שלח קוד איפוס");
+        }
+        return;
+      }
+
+      /* Step 2 - verify the emailed code. Establishes a recovery session. */
+      if (step === "code") {
+        const btn = $("resetVerifyBtn");
+        const token = $("resetCode").value.trim();
+        if (!token) return showError("יש להזין את הקוד שנשלח");
+        setBusy(btn, true, "אמת קוד");
+        const { error } = await adminSupabase.auth.verifyOtp({ email, token, type: "recovery" });
+        setBusy(btn, false, "אמת קוד");
+        if (error) {
+          console.warn("[reset] verify failed:", error?.status || "", error?.name || "error");
+          showError("הקוד שגוי או פג תוקפו");
+          return;
+        }
+        step = "password";
+        stepCode.hidden = true;
+        stepPass.hidden = false;
+        clearInterval(countdownTimer);
+        $("resetNewPassword").focus();
+        return;
+      }
+
+      /* Step 3 - set the new password, then drop the recovery session. */
+      if (step === "password") {
+        const btn = $("resetSaveBtn");
+        const pw      = $("resetNewPassword").value;
+        const confirm = $("resetConfirmPassword").value;
+        const problem = passwordProblem(pw, confirm);
+        if (problem) return showError(problem);
+
+        setBusy(btn, true, "עדכן סיסמה");
+        const { error } = await adminSupabase.auth.updateUser({ password: pw });
+        if (error) {
+          console.warn("[reset] update failed:", error?.status || "", error?.name || "error");
+          setBusy(btn, false, "עדכן סיסמה");
+          showError("עדכון הסיסמה נכשל, נסה שוב");
+          return;
+        }
+
+        // Recovery session is single-purpose: retire it immediately so a shared
+        // or unattended machine is not left holding a live admin session.
+        clearError();
+        successMsg.hidden = false;
+        await adminSupabase.auth.signOut();
+        cleanup();
+        setTimeout(() => { showLogin(); }, 1500);
+      }
+    });
+
+    /* Resend - only reachable once the countdown has elapsed. */
+    resendBtn.addEventListener("click", async () => {
+      clearError();
+      resendBtn.disabled = true;
+      try {
+        const { cooldownSeconds } = await requestCode(email);
+        startCooldown(cooldownSeconds);
+      } catch (err) {
+        console.warn("[reset] resend failed:", err?.message || err);
+        showError("שגיאה בשליחת הקוד, נסה שוב");
+      } finally {
+        resendBtn.disabled = false;
+      }
+    });
+
+    function cleanup() {
+      clearInterval(countdownTimer);
+      recoveryInProgress = false;
+      email = "";
+    }
+
+    $("resetBackBtn").addEventListener("click", async () => {
+      // Abandoning mid-flow can leave a verified recovery session behind; clear
+      // it so backing out never yields a logged-in dashboard.
+      if (step === "password") await adminSupabase.auth.signOut();
+      cleanup();
+      showLogin();
     });
   }
 
@@ -658,12 +977,27 @@
     // Magic-link return: when the admin clicks the emailed link, Supabase
     // restores the session on page load and fires SIGNED_IN - load the dashboard.
     adminSupabase.auth.onAuthStateChange((event, session) => {
-      if (event === "SIGNED_IN" && session) {
+      // PASSWORD_RECOVERY arrives when Supabase restores a session from a
+      // recovery link. Never a dashboard hand-off - route it into the reset
+      // flow so the admin lands on "choose a new password", not on the data.
+      if (event === "PASSWORD_RECOVERY") {
+        showReset(session?.user?.email || "", { startAtPassword: true });
+        return;
+      }
+      // verifyOtp() in the reset flow also emits SIGNED_IN. Honouring it would
+      // replace the half-finished reset view with the dashboard and leave the
+      // password unchanged, so suppress it while a reset is in progress.
+      if (event === "SIGNED_IN" && session && !recoveryInProgress) {
         showDashboard(session.access_token);
       }
     });
 
     const { data: { session } } = await adminSupabase.auth.getSession();
+    // A PASSWORD_RECOVERY event can land while this await is still pending. It
+    // has already rendered the reset view against a recovery session, and that
+    // session is a valid one - so an unguarded check here would immediately
+    // replace the reset view with the dashboard.
+    if (recoveryInProgress) return;
     if (session) {
       showDashboard(session.access_token);
     } else {

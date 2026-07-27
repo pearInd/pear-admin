@@ -52,6 +52,31 @@ const ALLOWED_ORIGINS = (process.env.DECART_ALLOWED_ORIGINS || "")
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "")
   .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 
+/* Password-reset allowlist — a DELIBERATELY separate, narrower list than
+   ADMIN_EMAILS. Being able to read the dashboard and being able to seize an
+   account by resetting its password are different privileges, so the second one
+   is not inherited from the first. Override with PASSWORD_RESET_EMAILS (same
+   comma-separated form) to change it without a redeploy.
+
+   These are addresses, not credentials — nothing here is secret, so hardcoding
+   the default is not a leak. The security property comes from the check being
+   performed HERE, server-side, before anything is emailed.
+
+   SCOPE — read this before treating the allowlist as absolute. It gates THIS
+   endpoint, which is the only path the UI uses. It cannot gate Supabase's own
+   /auth/v1/recover endpoint: the anon key is public by design (it ships in
+   admin.js), so anyone can POST to Supabase directly and ask for a recovery
+   mail for any address. What actually contains that:
+     • recovery only ever emails an EXISTING Supabase user, so keep the Auth →
+       Users table limited to real admins;
+     • Supabase enforces its own per-address send limits;
+     • possessing the emailed code still requires access to that inbox.
+   Treat this list as "who can drive reset from our UI", and the Supabase user
+   table as the real boundary. Keep the two in agreement.                       */
+const PASSWORD_RESET_EMAILS = (
+  process.env.PASSWORD_RESET_EMAILS || "grtnryyr@gmail.com,itaiarazi99@gmail.com"
+).split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+
 /* ── Express setup ───────────────────────────────────────────────────────── */
 const app = express();
 app.use(express.json({ limit: "8mb" }));
@@ -127,6 +152,7 @@ const userLimiter     = rateLimit({ windowMs: 60_000, max: 20 });   // user regi
 const trackLimiter    = rateLimit({ windowMs: 60_000, max: 60 });   // analytics ping
 const proxyLimiter    = rateLimit({ windowMs: 60_000, max: 120 });  // image proxy
 const authLimiter     = rateLimit({ windowMs: 60_000, max: 10 });   // admin login - brake password guessing
+const resetLimiter    = rateLimit({ windowMs: 15 * 60_000, max: 5 }); // password reset - per IP, tighter than login
 const classifyLimiter = rateLimit({ windowMs: 60_000, max: 20 });   // garment front/back classification - calls Gemini
 const storeCatalogLimiter = rateLimit({ windowMs: 60_000, max: 30 }); // "Complete the Look" store-scoped catalog reads
 
@@ -979,6 +1005,99 @@ app.post("/api/admin/check-auth", authLimiter, (req, res) => {
   }
   console.log('[admin-auth] match result:', true);
   res.json({ allowed: true });
+});
+
+/* ── Password-reset request ────────────────────────────────────────────────────
+   Per-address cooldown, separate from the per-IP resetLimiter above. The IP
+   limiter stops one host hammering the endpoint; this stops a distributed set of
+   hosts (or one host behind rotating egress IPs) from flooding a single inbox.
+
+   Entries are recorded for EVERY syntactically valid address, allowlisted or
+   not. That is deliberate: if only allowlisted addresses were tracked, the
+   cooldown value in the response would differ between the two cases and would
+   itself become an allowlist oracle. Bounded + pruned so unrecognised addresses
+   cannot grow it without limit.                                                */
+const RESET_COOLDOWN_MS = 60_000;
+const RESET_COOLDOWN_MAX_ENTRIES = 500;
+const resetCooldown = new Map();   // email -> timestamp of last accepted request
+
+function resetCooldownRemainingMs(email) {
+  const last = resetCooldown.get(email);
+  if (!last) return 0;
+  const elapsed = Date.now() - last;
+  return elapsed >= RESET_COOLDOWN_MS ? 0 : RESET_COOLDOWN_MS - elapsed;
+}
+
+function noteResetRequest(email) {
+  const now = Date.now();
+  for (const [k, t] of resetCooldown) {
+    if (now - t >= RESET_COOLDOWN_MS) resetCooldown.delete(k);
+  }
+  if (resetCooldown.size >= RESET_COOLDOWN_MAX_ENTRIES) {
+    // Evict oldest. Map preserves insertion order, and every entry is rewritten
+    // on each accepted request, so the first key is the least recently used.
+    const oldest = resetCooldown.keys().next().value;
+    if (oldest !== undefined) resetCooldown.delete(oldest);
+  }
+  resetCooldown.set(email, now);
+}
+
+/* POST /api/admin/request-password-reset
+   Body: { email }
+   Always answers { ok: true, cooldownSeconds } with the same shape and status,
+   whether or not the address is allowlisted, exists, or is mid-cooldown. The
+   caller learns nothing about who is an admin; only an allowlisted address ever
+   causes Supabase to send anything. The UI copy is written to match ("if this
+   address is authorised, a code is on its way").
+
+   Not constant-time: an allowlisted address awaits a Supabase round-trip, so
+   responses are measurably slower than a rejection. Closing that would mean
+   deferring the send past the response, which Vercel may kill once the function
+   returns. Rate limiting is the mitigation; the exposure is a timing oracle over
+   a two-address list whose members the operator already knows.                  */
+app.post("/api/admin/request-password-reset", resetLimiter, async (req, res) => {
+  const email = String(req.body?.email || "").toLowerCase().trim();
+
+  // Shape check only — never reveals allowlist membership.
+  const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
+  if (!looksLikeEmail) {
+    return res.status(400).json({ ok: false, error: "invalid_email" });
+  }
+
+  const remaining = resetCooldownRemainingMs(email);
+  if (remaining > 0) {
+    return res.json({ ok: true, cooldownSeconds: Math.ceil(remaining / 1000) });
+  }
+  noteResetRequest(email);
+
+  const allowed = PASSWORD_RESET_EMAILS.includes(email);
+  // Log the DECISION, never the address of a rejected attempt — access logs are
+  // a lower-trust surface than this endpoint and would otherwise accumulate a
+  // list of addresses that probed it.
+  console.log(`[admin-reset] request accepted=${allowed}`);
+
+  if (allowed) {
+    if (!supabase) {
+      // Misconfiguration, not a client error. Still answer uniformly so a broken
+      // deploy does not become a way to enumerate the allowlist.
+      console.error("[admin-reset] Supabase client unavailable — no email sent. " +
+                    "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
+    } else {
+      const proto = (req.headers["x-forwarded-proto"] || req.protocol || "https")
+        .split(",")[0].trim();
+      const host  = (req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
+      const redirectTo = host ? `${proto}://${host}/` : undefined;
+      try {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+        // Status/name only — the body can carry user metadata.
+        if (error) console.warn("[admin-reset] send failed:", error?.status || "", error?.name || "error");
+      } catch (err) {
+        console.warn("[admin-reset] send threw:", err?.message || err);
+      }
+    }
+  }
+
+  res.json({ ok: true, cooldownSeconds: Math.ceil(RESET_COOLDOWN_MS / 1000) });
 });
 
 /* ── In-memory image cache - avoids re-fetching the same CDN image within a warm
