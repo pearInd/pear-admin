@@ -458,20 +458,49 @@ app.get("/api/test-sheets", requireAdminAuth, async (req, res) => {
 console.log(`[sessions] data backend: ${appSupabase ? "Supabase (app project)" : "DISABLED (APP_SUPABASE_* missing)"}`);
 console.log(`[admin-auth] auth backend: ${authSupabase ? "Supabase (auth project)" : "DISABLED (SUPABASE_* missing)"}`);
 
+/* What SUPABASE-ish env names this process can actually see, e.g.
+   ["SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_URL"]. This is the single most useful
+   diagnostic fact when a client is null: it separates "the variable was never
+   set on this deployment" from "it was set under a name that doesn't quite
+   match" (APP_SUPBASE_URL, trailing space, wrong casing) — two very different
+   fixes that an "unconfigured" message alone cannot distinguish. */
+function visibleSupabaseEnvNames() {
+  return Object.keys(process.env).filter((k) => /SUPABASE/i.test(k)).sort();
+}
+
 /* Guards for the two clients. When a client is null (env vars missing) these
    return a clear 503 instead of dereferencing null and crashing. Each returns
    true once it has sent the response, so the caller should `return`.
 
    They are deliberately separate: the app-data client being down must not block
    admin token verification, and vice versa. Naming the right variable in the
-   message is the difference between a one-minute fix and an afternoon. */
+   message is the difference between a one-minute fix and an afternoon.
+
+   The message string itself carries the env-name list and the Vercel
+   environment/deployment. admin.js renders res.body.message verbatim into the
+   dashboard's error banner (see loadSessions' catch block), so this turns "data
+   not configured" — which says nothing about WHY — into something that answers
+   the question on screen, with no DevTools step required. Full detail, with key
+   roles and project-ref matching, is still at GET /api/admin/diagnostics. */
+function unavailableMessage(missingVars) {
+  const seen = visibleSupabaseEnvNames();
+  const seenPart = seen.length
+    ? `Visible SUPABASE-ish vars on this deployment: ${seen.join(", ")}.`
+    : "No SUPABASE-ish env vars are visible to this process at all.";
+  const env = process.env.VERCEL_ENV || "local";
+  const depl = process.env.VERCEL_URL ? ` (${process.env.VERCEL_URL})` : "";
+  return `${missingVars} not set on THIS deployment [${env}${depl}]. ${seenPart} ` +
+         "If you already added it in Vercel: (1) confirm it is on the project that " +
+         "serves this exact domain, not a different project, and (2) Redeploy — " +
+         "saving an env var does not restart already-running deployments.";
+}
+
 function storageUnavailable(res) {
   if (appSupabase) return false;
   res.status(503).json({
     ok: false,
     error: "storage_unconfigured",
-    message: "App database not configured (APP_SUPABASE_URL / APP_SUPABASE_SERVICE_ROLE_KEY " +
-             "missing). Session and user features are temporarily unavailable.",
+    message: unavailableMessage("APP_SUPABASE_URL / APP_SUPABASE_SERVICE_ROLE_KEY"),
   });
   return true;
 }
@@ -481,7 +510,7 @@ function authUnavailable(res) {
   res.status(503).json({
     ok: false,
     error: "auth_unconfigured",
-    message: "Admin auth not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing).",
+    message: unavailableMessage("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY"),
   });
   return true;
 }
