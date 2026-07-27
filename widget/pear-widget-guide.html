@@ -1,0 +1,1358 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PEAR — Virtual Try-On · תא המדידה של העתיד</title>
+<meta name="description" content="PEAR Virtual Try-On — מדידה וירטואלית מבוססת AI לחנויות אופנה. מודדים בבית, קונים בביטחון.">
+
+<!-- ════════════════════════════════════════════════════════════════
+     FONTS · Heebo (Hebrew UI) + JetBrains Mono (code, numerals)
+     ════════════════════════════════════════════════════════════════ -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<!-- ════════════════════════════════════════════════════════════════
+     TAILWIND (CDN) · restrained palette:
+       base    = slate (backgrounds, text)
+       brand   = emerald  → Try-On category + primary CTAs
+       fit     = sky      → Sizing/Fit category
+       convert = violet   → Recommendations/Inventory category
+     Three purposeful accents, used ONLY inside their category.
+     ════════════════════════════════════════════════════════════════ -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['Heebo', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+          mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+        },
+        colors: {
+          pear: { 50:'#ecfdf5', 100:'#d1fae5', 200:'#a7f3d0', 400:'#34d399', 500:'#10b981', 600:'#059669', 700:'#047857' },
+        },
+        boxShadow: {
+          card: '0 1px 2px rgb(15 23 42 / 0.04), 0 8px 24px -8px rgb(15 23 42 / 0.08)',
+          lift: '0 2px 4px rgb(15 23 42 / 0.05), 0 16px 40px -12px rgb(15 23 42 / 0.14)',
+          btn:  '0 8px 24px -6px rgb(16 185 129 / 0.45)',
+        },
+      },
+    },
+  };
+</script>
+
+<style type="text/css">
+  .pear-wordmark { font-family: 'Didot', 'Didot LT STD', 'Bodoni MT', 'Cochin', 'Georgia', serif; }
+  /* ══════════════════════════════════════════════════════════════
+     CUSTOM CSS · effects Tailwind utilities don't cover.
+     Sections: base / views / reveal / nav / scroll HUD / glow CTA /
+               3D tilt / stage / bento / simulator / split / intro-lock
+     ══════════════════════════════════════════════════════════════ */
+  html { scroll-behavior: smooth; }
+  ::selection { background: #10b981; color: #fff; }
+
+  /* ── View switching (2-page SPA: #overview / #docs) ── */
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* ── Scroll reveal (cosmetic only — a safety sweep guarantees visibility) ── */
+  .reveal { opacity: 0; transform: translateY(16px); transition: opacity .6s cubic-bezier(.2,.6,.2,1), transform .6s cubic-bezier(.2,.6,.2,1); }
+  .reveal.in { opacity: 1; transform: none; }
+
+  /* ── Active nav tab underline ── */
+  .nav-tab { position: relative; }
+  .nav-tab::after {
+    content: ''; position: absolute; inset-inline: 0; bottom: -1px; height: 2px;
+    background: #10b981; border-radius: 2px; transform: scaleX(0); transition: transform .25s ease;
+  }
+  .nav-tab[aria-current="page"] { color: #0f172a; }
+  .nav-tab[aria-current="page"]::after { transform: scaleX(1); }
+
+  /* ── Primary CTA: glow + shine sweep micro-interaction ── */
+  .cta-glow { position: relative; overflow: hidden; isolation: isolate; }
+  .cta-glow::before {                       /* moving shine strip */
+    content: ''; position: absolute; top: 0; bottom: 0; width: 40%;
+    inset-inline-start: -60%; z-index: -1;
+    background: linear-gradient(105deg, transparent, rgb(255 255 255 / 0.35), transparent);
+    transform: skewX(-18deg); transition: inset-inline-start .6s ease;
+  }
+  .cta-glow:hover::before { inset-inline-start: 130%; }
+  .cta-glow:hover { box-shadow: 0 0 0 1px rgb(16 185 129 / .4), 0 10px 40px -6px rgb(16 185 129 / .65); }
+
+  /* ── Hero mockup: 3D tilt driven by mouse (JS sets --rx/--ry) ── */
+  .tilt-scene { perspective: 1200px; }
+  .tilt-card {
+    transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+    transition: transform .18s ease-out;
+    transform-style: preserve-3d;
+    will-change: transform;
+  }
+  .tilt-card .tilt-float { transform: translateZ(46px); }   /* badges hover above the card */
+
+  /* ── Scroll HUD · glowing ring gauge + % + chapter label (fixed corner) ── */
+  #scrollHud {
+    position: fixed; bottom: 1.4rem; right: 1.4rem; z-index: 55;
+    display: flex; align-items: center; gap: .65rem;
+    padding: .5rem .95rem .5rem .55rem;
+    background: rgb(255 255 255 / .78);
+    -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    border: 1px solid rgb(226 232 240 / .9);
+    border-radius: 9999px;
+    box-shadow: 0 8px 30px -8px rgb(15 23 42 / .18), 0 0 26px -6px rgb(16 185 129 / .4);
+    direction: ltr;
+  }
+  #scrollHud svg { filter: drop-shadow(0 0 6px rgb(16 185 129 / .5)); }
+  #hudRing { transition: stroke-dashoffset .12s linear; }
+  @media (max-width: 640px) { #scrollHud { display: none; } }
+
+  /* ── Navbar lifts off the page once you scroll ── */
+  header.is-scrolled { box-shadow: 0 8px 30px -12px rgb(15 23 42 / 0.15); }
+
+  /* ── Split headlines: GSAP animates each .w word span into place ── */
+  [data-split] .w { display: inline-block; will-change: transform, opacity; }
+
+  /* ── Bento upgrades: cursor-following glow overlay (JS sets --gx/--gy) ── */
+  .bento { position: relative; }
+  .bento::after {
+    content: ''; position: absolute; inset: 0; border-radius: inherit;
+    background: radial-gradient(260px circle at var(--gx, 50%) var(--gy, 50%), var(--glow, rgb(16 185 129 / .16)), transparent 65%);
+    opacity: 0; transition: opacity .3s; pointer-events: none;
+  }
+  .bento:hover::after { opacity: 1; }
+  .bento[data-tone="emerald"] { --glow: rgb(16 185 129 / .17); }
+  .bento[data-tone="sky"]     { --glow: rgb(14 165 233 / .17); }
+  .bento[data-tone="violet"]  { --glow: rgb(139 92 246 / .17); }
+
+  /* ── Bento cards: depth + colored glow per category on hover ── */
+  .bento {
+    transition: transform .3s cubic-bezier(.2,.6,.2,1), box-shadow .3s;
+  }
+  .bento:hover { transform: translateY(-5px); }
+  .bento[data-tone="emerald"]:hover { box-shadow: 0 20px 50px -16px rgb(16 185 129 / .35); }
+  .bento[data-tone="sky"]:hover     { box-shadow: 0 20px 50px -16px rgb(14 165 233 / .35); }
+  .bento[data-tone="violet"]:hover  { box-shadow: 0 20px 50px -16px rgb(139 92 246 / .35); }
+
+  /* ── Simulator: animated confidence bar + thinking dots ── */
+  .conf-bar { transition: width 1s cubic-bezier(.2,.6,.2,1); }
+  .dots i { animation: dot 1s infinite; font-style: normal; }
+  .dots i:nth-child(2) { animation-delay: .18s; }
+  .dots i:nth-child(3) { animation-delay: .36s; }
+  @keyframes dot { 0%,60%,100% { opacity: .25; } 30% { opacity: 1; } }
+
+  /* ── Testimonial highlight marker ── */
+  mark.hl { background: linear-gradient(transparent 55%, rgb(16 185 129 / .28) 55%); color: inherit; font-weight: 800; padding: 0 .1em; }
+
+  /* ── 3D stage: a FIXED full-viewport layer — the pear travels the whole
+       overview page with the scroll. pointer-events:none keeps every click
+       working; hidden on mobile (perf) and while the docs view is open. ── */
+  /* The pear rides a FIXED layer BEHIND all content (z:-1), above the page
+     backdrop (z:-2). Because the UI panels are translucent liquid glass, the
+     pear shows softly THROUGH / around them while text stays crisp on top —
+     so it can never obscure what you're reading. */
+  #pearStage { position: fixed; inset: 0; z-index: -1; pointer-events: none; }
+  #pearStage canvas { width: 100%; height: 100%; display: block; }
+  #pageBg {
+    position: fixed; inset: 0; z-index: -2; pointer-events: none;
+    background:
+      radial-gradient(1200px 720px at 80% -8%, rgba(16,185,129,0.12), transparent 60%),
+      radial-gradient(1000px 640px at 6% 104%, rgba(56,189,248,0.09), transparent 60%),
+      linear-gradient(180deg, #f7f9fc 0%, #eef1f6 55%, #f4f7fb 100%);
+  }
+  body.docs-active #pearStage, body.docs-active #scrollHud { display: none; }
+  @media (max-width: 1023px) { #pearStage { display: none; } }
+
+  /* ── LIQUID GLASS surfaces (Apple-style): translucent + blurred + saturated,
+       with a bright specular top edge, a hairline rim, and soft depth. The pear
+       drifting behind refracts through the blur for the "liquid" feel. ── */
+  .glass {
+    background: linear-gradient(160deg, rgba(255,255,255,0.66), rgba(255,255,255,0.40));
+    -webkit-backdrop-filter: blur(22px) saturate(1.85);
+            backdrop-filter: blur(22px) saturate(1.85);
+    box-shadow:
+      0 14px 44px -14px rgba(15,23,42,0.30),
+      inset 0 1px 0 rgba(255,255,255,0.92),
+      inset 0 0 0 1px rgba(255,255,255,0.35);
+  }
+  .glass-dark {
+    background: linear-gradient(160deg, rgba(15,23,42,0.74), rgba(15,23,42,0.56));
+    -webkit-backdrop-filter: blur(22px) saturate(1.5);
+            backdrop-filter: blur(22px) saturate(1.5);
+    box-shadow:
+      0 14px 44px -14px rgba(0,0,0,0.55),
+      inset 0 1px 0 rgba(255,255,255,0.16),
+      inset 0 0 0 1px rgba(255,255,255,0.08);
+  }
+
+  /* Intro gate: scroll is locked while the hero pear drops into place, then released. */
+  html.intro-lock, html.intro-lock body { overflow: hidden !important; height: 100%; }
+
+  /* Code blocks are always LTR, regardless of page direction. */
+  .code-scroll { direction: ltr; text-align: left; overflow-x: auto; }
+
+  /* ── Reduced motion: kill all decorative movement ── */
+  @media (prefers-reduced-motion: reduce) {
+    .reveal { opacity: 1; transform: none; transition: none; }
+    .dots i { animation: none; }
+    .tilt-card { transform: none !important; }
+    #scrollHud, #pearStage { display: none; }
+    [data-split] .w { transform: none !important; opacity: 1 !important; }
+  }
+</style>
+</head>
+
+<body class="bg-slate-50 text-slate-700 font-sans antialiased leading-relaxed">
+
+<!-- Futuristic scroll HUD: glowing ring gauge + percentage + current chapter -->
+<div id="scrollHud" aria-hidden="true">
+  <svg width="34" height="34" viewBox="0 0 40 40">
+    <defs><linearGradient id="hudGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#34d399"/><stop offset="1" stop-color="#047857"/>
+    </linearGradient></defs>
+    <circle cx="20" cy="20" r="16" fill="none" stroke="#e2e8f0" stroke-width="3.5"/>
+    <circle id="hudRing" cx="20" cy="20" r="16" fill="none" stroke="url(#hudGrad)" stroke-width="3.5"
+            stroke-linecap="round" stroke-dasharray="100.5" stroke-dashoffset="100.5"
+            transform="rotate(-90 20 20)"/>
+  </svg>
+  <div class="leading-tight">
+    <div class="font-mono text-[13px] font-bold text-slate-900"><span id="hudPct">0</span>%</div>
+    <div class="text-[10px] font-bold text-pear-700 max-w-[9rem] truncate" id="hudLabel" dir="rtl">פתיחה</div>
+  </div>
+</div>
+
+<!-- Page backdrop (behind the pear) + the fixed 3D pear layer -->
+<div id="pageBg" aria-hidden="true"></div>
+<div id="pearStage" aria-hidden="true"></div>
+
+<!-- ════════════════════════════════════════════════════════════════
+     NAVBAR · frosted, sticky. Tabs switch the two views (SPA).
+     ════════════════════════════════════════════════════════════════ -->
+<header class="sticky top-0 z-50 bg-white/55 backdrop-blur-2xl border-b border-white/50" style="box-shadow: inset 0 -1px 0 rgba(255,255,255,0.4), 0 4px 24px -12px rgba(15,23,42,0.15);">
+  <nav class="max-w-6xl mx-auto px-5 sm:px-8 h-16 flex items-center justify-between" aria-label="ניווט ראשי">
+    <a href="#overview" data-nav="overview" class="nav-link flex items-center gap-2 font-mono font-bold text-lg tracking-tight text-slate-900">
+      <span class="pear-wordmark">PEAR</span><span class="w-2 h-2 rounded-full bg-pear-500 inline-block"></span>
+    </a>
+
+    <div class="flex items-center gap-1 sm:gap-2 h-full">
+      <a href="#overview" data-nav="overview" class="nav-link nav-tab h-full inline-flex items-center px-3 sm:px-4 text-sm font-medium text-slate-500 hover:text-slate-900 transition-colors">אודות המיזם</a>
+      <a href="#docs" data-nav="docs" class="nav-link nav-tab h-full inline-flex items-center px-3 sm:px-4 text-sm font-medium text-slate-500 hover:text-slate-900 transition-colors">מדריך הטמעה</a>
+    </div>
+
+    <a href="mailto:itaiarazi99@gmail.com"
+       class="hidden sm:inline-flex items-center gap-1.5 rounded-lg bg-slate-900 text-white text-sm font-semibold px-4 py-2 hover:bg-slate-700 transition-colors">
+      דברו איתנו
+    </a>
+  </nav>
+</header>
+
+<!-- ════════════════════════════════════════════════════════════════
+     VIEW 1 · LANDING (high-converting overview)
+     ════════════════════════════════════════════════════════════════ -->
+<main id="view-overview" class="view active" aria-label="אודות המיזם והפתרון">
+
+  <!-- ══════════ HERO · copy + social proof + 3D-tilt product mockup ══════════ -->
+  <section id="hero" data-hud="פתיחה" class="relative overflow-hidden border-b border-white/50">
+    <!-- quiet top aura (drifts on scroll — parallax depth layer) -->
+    <div class="parallax-blob pointer-events-none absolute inset-x-0 -top-40 h-96 bg-[radial-gradient(ellipse_50%_100%_at_50%_0%,rgb(16_185_129/0.08),transparent_70%)]" data-speed=".35"></div>
+
+
+    <div class="relative max-w-6xl mx-auto px-5 sm:px-8 pt-16 pb-16 sm:pt-24 sm:pb-24 grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
+
+      <!-- ── Copy side ── -->
+      <div class="text-center lg:text-start relative z-10">
+        <p class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3.5 py-1.5 text-xs font-mono font-medium text-slate-500 mb-7">
+          <span class="w-1.5 h-1.5 rounded-full bg-pear-500"></span>
+          Virtual Try-On · AI for Fashion E-commerce
+        </p>
+
+        <h1 data-split class="text-4xl sm:text-5xl xl:text-6xl font-black text-slate-900 tracking-tight leading-[1.07] mb-6">
+          הלקוחות שלכם מודדים
+          <span class="block mt-2 text-pear-600">בלי להגיע לחנות.</span>
+        </h1>
+
+        <p class="max-w-xl mx-auto lg:mx-0 text-lg sm:text-xl text-slate-500 leading-relaxed mb-8">
+          PEAR מלביש את הבגד על הלקוח בזמן אמת, ממליץ מידה מדויקת — ומוריד החזרות.
+          <span class="font-semibold text-slate-700">מודדים בבית, קונים בביטחון.</span>
+        </p>
+
+        <!-- Frictionless CTAs -->
+        <div class="flex flex-wrap items-center justify-center lg:justify-start gap-3 mb-4">
+          <button data-scroll="playground"
+             class="cta-glow inline-flex items-center gap-2 rounded-xl bg-pear-600 text-white font-bold px-7 py-3.5 shadow-btn hover:bg-pear-700 hover:-translate-y-0.5 transition-all">
+            ✨ נסו את הסימולטור — 30 שניות
+          </button>
+          <button data-scroll="demo"
+             class="inline-flex items-center gap-2 rounded-xl glass text-slate-700 font-bold px-7 py-3.5 hover:-translate-y-0.5 transition-all">
+            ▶ סיור של 2 דקות
+          </button>
+        </div>
+        <p class="text-xs text-slate-400 mb-8">בלי הרשמה · בלי כרטיס אשראי</p>
+
+        <!-- Above the fold: industry research + product capability (no client claims) -->
+        <div class="flex flex-wrap items-center justify-center lg:justify-start gap-x-5 gap-y-2">
+          <span class="text-sm text-slate-500">מחקרי שוק: <span class="font-bold text-slate-700">עד ~25% מהזמנות האופנה מוחזרות</span></span>
+          <span class="w-px h-4 bg-slate-200 hidden sm:block"></span>
+          <span class="text-sm text-slate-500">אי-התאמת מידה — <span class="font-bold text-slate-700">סיבת ההחזרה מס' 1</span></span>
+          <span class="w-px h-4 bg-slate-200 hidden sm:block"></span>
+          <span class="text-sm text-slate-500">הטמעה ב<span class="font-bold text-slate-700">שורת קוד אחת</span></span>
+        </div>
+      </div>
+
+      <!-- ── Mockup side: 3D tilt card + floating result badges ── -->
+      <div class="tilt-scene relative z-10 order-first lg:order-none">
+        <div class="parallax-blob pointer-events-none absolute -inset-10 bg-[radial-gradient(ellipse_at_center,rgb(16_185_129/0.12),transparent_65%)] blur-2xl" data-speed="-.25" aria-hidden="true"></div>
+
+        <div id="tiltCard" class="tilt-card relative max-w-md mx-auto rounded-3xl glass p-4">
+          <!-- brand animation = the product visual -->
+          <video class="w-full rounded-2xl" src="pear-anmtion.mp4" autoplay muted loop playsinline aria-label="אנימציית המותג של PEAR"></video>
+
+          <!-- floating chips: hover above the card in 3D space -->
+          <div class="tilt-float absolute -top-4 -left-3 sm:-left-6 rounded-xl glass px-4 py-2.5 flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-pear-500 animate-pulse"></span>
+            <span class="text-xs font-bold text-slate-700">מידה מומלצת: <span class="font-mono text-pear-600">M</span></span>
+          </div>
+          <div class="tilt-float absolute -bottom-4 -right-3 sm:-right-6 rounded-xl glass-dark text-white px-4 py-2.5">
+            <span class="text-xs font-bold">התאמה בזמן אמת ✨</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ══════════ PHASES + BENTO GRID · מודדים → מתאימים → ממירים ══════════ -->
+  <section id="platform" data-hud="הפלטפורמה" class="max-w-6xl mx-auto px-5 sm:px-8 py-20 sm:py-28">
+    <div class="max-w-2xl mx-auto text-center mb-6 reveal">
+      <p class="text-xs font-mono font-semibold tracking-[0.2em] text-pear-600 uppercase mb-3">הפלטפורמה</p>
+      <h2 data-split class="text-3xl sm:text-5xl font-black text-slate-900 tracking-tight mb-5">
+        מודדים<span class="text-pear-500">.</span> מתאימים<span class="text-sky-500">.</span> ממירים<span class="text-violet-500">.</span>
+      </h2>
+      <p class="text-slate-500 text-lg">שלוש יכולות, צבע לכל אחת — וכולן עובדות באותו וויג'ט אחד שמוטמע בשורת קוד.</p>
+    </div>
+
+    <!-- category legend -->
+    <div class="flex flex-wrap justify-center gap-2 mb-12 reveal">
+      <span class="inline-flex items-center gap-1.5 text-xs font-bold text-pear-700 bg-pear-50 border border-pear-100 rounded-full px-3 py-1.5"><span class="w-1.5 h-1.5 rounded-full bg-pear-500"></span>Try-On · מודדים</span>
+      <span class="inline-flex items-center gap-1.5 text-xs font-bold text-sky-700 bg-sky-50 border border-sky-100 rounded-full px-3 py-1.5"><span class="w-1.5 h-1.5 rounded-full bg-sky-500"></span>Fit · מתאימים</span>
+      <span class="inline-flex items-center gap-1.5 text-xs font-bold text-violet-700 bg-violet-50 border border-violet-100 rounded-full px-3 py-1.5"><span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>Convert · ממירים</span>
+    </div>
+
+    <!-- Bento grid: 12-col, varying spans -->
+    <div class="grid md:grid-cols-12 gap-5">
+
+      <!-- BIG · Try-On (emerald) -->
+      <div class="bento reveal md:col-span-7 rounded-3xl glass border border-pear-100/70 p-8" data-tone="emerald">
+        <span class="inline-flex items-center gap-1.5 text-[11px] font-mono font-bold text-pear-700 bg-white border border-pear-100 rounded-full px-2.5 py-1 mb-5">TRY-ON · LIVE</span>
+        <h3 class="text-2xl font-extrabold text-slate-900 mb-3">הלבשה פוטוריאליסטית בזמן אמת</h3>
+        <p class="text-slate-500 leading-relaxed max-w-md mb-6">
+          מנועי <span class="font-mono text-sm">Nano Banana 2</span> ו-<span class="font-mono text-sm">Decart Lucy</span> מלבישים את הבגד
+          על תמונת הלקוח לפי גזרה אמיתית ונקודות גוף — כולל חזית וגב, ישירות בדפדפן.
+        </p>
+        <!-- mini visual: front/back chips -->
+        <div class="flex gap-2">
+          <span class="rounded-lg bg-white border border-pear-100 px-3 py-1.5 text-xs font-bold text-slate-600">👕 חזית</span>
+          <span class="rounded-lg bg-white border border-pear-100 px-3 py-1.5 text-xs font-bold text-slate-600">🔄 גב</span>
+          <span class="rounded-lg bg-pear-600 text-white px-3 py-1.5 text-xs font-bold">AUTO ✨</span>
+        </div>
+      </div>
+
+      <!-- Fit / sizing (sky) -->
+      <div class="bento reveal md:col-span-5 rounded-3xl glass border border-sky-100/70 p-8" data-tone="sky">
+        <span class="inline-flex items-center gap-1.5 text-[11px] font-mono font-bold text-sky-700 bg-white border border-sky-100 rounded-full px-2.5 py-1 mb-5">FIT · SIZING</span>
+        <h3 class="text-2xl font-extrabold text-slate-900 mb-3">חישוב מידה חכם</h3>
+        <p class="text-slate-500 leading-relaxed mb-5">
+          אלגוריתם <span class="font-semibold text-slate-700">Penalty-based</span> מנתח גובה, משקל והיקפים ומחזיר את המידה שהכי פחות "תעניש" את הלקוח.
+        </p>
+        <div class="font-mono text-xs text-sky-700 bg-white border border-sky-100 rounded-lg px-3 py-2 inline-block" dir="ltr">size = argmin Σ penalty(fit)</div>
+      </div>
+
+      <!-- Body profile memory (sky, small) -->
+      <div class="bento reveal md:col-span-4 rounded-3xl glass border border-sky-100/70 p-7" data-tone="sky">
+        <span class="inline-flex items-center gap-1.5 text-[11px] font-mono font-bold text-sky-700 bg-sky-50 border border-sky-100 rounded-full px-2.5 py-1 mb-4">FIT · PROFILE</span>
+        <h3 class="text-lg font-extrabold text-slate-900 mb-2">פרופיל גוף נשמר</h3>
+        <p class="text-sm text-slate-500 leading-relaxed">בביקור הבא PEAR כבר מכיר את המידות — מדידה אחת, קניות בכל החנות.</p>
+      </div>
+
+      <!-- Recommendations (violet, small) -->
+      <div class="bento reveal md:col-span-4 rounded-3xl glass border border-violet-100/70 p-7" data-tone="violet">
+        <span class="inline-flex items-center gap-1.5 text-[11px] font-mono font-bold text-violet-700 bg-violet-50 border border-violet-100 rounded-full px-2.5 py-1 mb-4">CONVERT · AI STYLIST</span>
+        <h3 class="text-lg font-extrabold text-slate-900 mb-2">אאוטפיטים והמלצות</h3>
+        <p class="text-sm text-slate-500 leading-relaxed">ה-AI מרכיב לוק שלם מהקטלוג — פריטים משלימים שמעלים סל ממוצע.</p>
+      </div>
+
+      <!-- Inventory sync (violet, small) -->
+      <div class="bento reveal md:col-span-4 rounded-3xl glass border border-violet-100/70 p-7" data-tone="violet">
+        <span class="inline-flex items-center gap-1.5 text-[11px] font-mono font-bold text-violet-700 bg-white border border-violet-100 rounded-full px-2.5 py-1 mb-4">CONVERT · INVENTORY</span>
+        <h3 class="text-lg font-extrabold text-slate-900 mb-2">סנכרון מלאי חכם</h3>
+        <p class="text-sm text-slate-500 leading-relaxed">התראות חוסרים בזמן אמת — הלקוח לא יתאהב בפריט שאזל, והמלאי הנעול מ-Bracketing משתחרר.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ INTERACTIVE PLAYGROUND · size simulator, zero signup ══════════ -->
+  <section id="playground" data-hud="סימולטור" class="border-y border-white/50">
+    <div class="max-w-6xl mx-auto px-5 sm:px-8 py-20 sm:py-28">
+      <div class="max-w-2xl mx-auto text-center mb-12 reveal">
+        <p class="text-xs font-mono font-semibold tracking-[0.2em] text-pear-600 uppercase mb-3">Playground · בלי הרשמה</p>
+        <h2 data-split class="text-3xl sm:text-4xl font-extrabold text-slate-900 tracking-tight mb-4">נסו את מנוע המידות. עכשיו.</h2>
+        <p class="text-slate-500 text-lg">זהו בדיוק החישוב שהלקוחות שלכם יקבלו בדף המוצר — הזינו נתונים וקבלו מידה.</p>
+      </div>
+
+      <div class="grid lg:grid-cols-2 gap-8 items-stretch max-w-4xl mx-auto">
+
+        <!-- ── inputs card ── -->
+        <div class="reveal rounded-3xl glass p-7">
+          <p class="text-xs font-mono tracking-widest text-slate-400 uppercase mb-5">1 · הפרופיל שלכם</p>
+
+          <!-- height -->
+          <label class="block mb-5">
+            <span class="flex justify-between text-sm font-bold text-slate-700 mb-2">גובה <span class="font-mono text-pear-600"><span id="hVal">172</span> ס"מ</span></span>
+            <input id="hIn" type="range" min="145" max="205" value="172" class="w-full accent-emerald-600">
+          </label>
+
+          <!-- weight -->
+          <label class="block mb-6">
+            <span class="flex justify-between text-sm font-bold text-slate-700 mb-2">משקל <span class="font-mono text-pear-600"><span id="wVal">70</span> ק"ג</span></span>
+            <input id="wIn" type="range" min="40" max="150" value="70" class="w-full accent-emerald-600">
+          </label>
+
+          <!-- garment -->
+          <p class="text-sm font-bold text-slate-700 mb-2">הפריט</p>
+          <div id="garmentChips" class="flex flex-wrap gap-2 mb-7">
+            <button data-g="tee"   class="g-chip rounded-lg px-3.5 py-2 text-xs font-bold border transition-all bg-pear-600 text-white border-pear-600">👕 חולצת אוברסייז</button>
+            <button data-g="jeans" class="g-chip rounded-lg px-3.5 py-2 text-xs font-bold border transition-all bg-white text-slate-600 border-slate-200 hover:border-pear-400">👖 ג'ינס סלים</button>
+            <button data-g="dress" class="g-chip rounded-lg px-3.5 py-2 text-xs font-bold border transition-all bg-white text-slate-600 border-slate-200 hover:border-pear-400">👗 שמלת מידי</button>
+          </div>
+
+          <button id="simBtn"
+             class="cta-glow w-full inline-flex items-center justify-center gap-2 rounded-xl bg-pear-600 text-white font-bold px-6 py-3.5 shadow-btn hover:bg-pear-700 transition-all">
+            ✨ חשבו לי מידה
+          </button>
+        </div>
+
+        <!-- ── result card ── -->
+        <div class="reveal rounded-3xl glass p-7 flex flex-col">
+          <p class="text-xs font-mono tracking-widest text-slate-400 uppercase mb-5">2 · ההמלצה של PEAR</p>
+
+          <!-- idle / busy / done states are swapped by JS -->
+          <div id="simIdle" class="flex-1 flex flex-col items-center justify-center text-center text-slate-400">
+            <div class="w-14 h-14 rounded-2xl bg-slate-100 flex items-center justify-center text-2xl mb-4">🍐</div>
+            <p class="text-sm">הזינו פרופיל ולחצו "חשבו לי מידה"</p>
+          </div>
+
+          <div id="simBusy" class="flex-1 hidden flex-col items-center justify-center text-center">
+            <p class="font-mono text-sm text-slate-500 dots">ה-AI מודד<i>.</i><i>.</i><i>.</i></p>
+          </div>
+
+          <div id="simDone" class="flex-1 hidden flex-col">
+            <div class="flex items-end justify-between mb-2">
+              <span class="text-6xl font-black font-mono text-pear-600" id="simSize">M</span>
+              <span class="text-xs font-mono text-slate-400" id="simBase">הערכת התאמה · הדגמה</span>
+            </div>
+            <p class="text-sm font-bold text-slate-700 mb-1.5">רמת ביטחון <span class="font-mono text-pear-600" id="simConfTxt">94%</span></p>
+            <div class="h-2.5 rounded-full bg-slate-100 overflow-hidden mb-6">
+              <div id="simConf" class="conf-bar h-full rounded-full bg-gradient-to-l from-pear-400 to-pear-600" style="width:0%"></div>
+            </div>
+            <p class="text-sm text-slate-500 leading-relaxed mb-6" id="simNote"></p>
+            <a href="mailto:itaiarazi99@gmail.com" class="mt-auto w-full text-center rounded-xl bg-slate-900 text-white font-bold px-6 py-3 hover:bg-slate-700 transition-colors">
+              ככה זה ירגיש ללקוח → דברו איתנו
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ DEMO · 2-minute tour (dark band) ══════════ -->
+  <section id="demo" data-hud="הדגמה חיה" class="glass-dark">
+    <div class="max-w-4xl mx-auto px-5 sm:px-8 py-20 sm:py-28">
+      <div class="max-w-2xl mb-12 reveal">
+        <p class="text-xs font-mono font-semibold tracking-[0.2em] text-pear-400 uppercase mb-3">סיור של 2 דקות</p>
+        <h2 data-split class="text-3xl sm:text-4xl font-extrabold text-white tracking-tight mb-4">כך זה נראה ללקוח שלכם</h2>
+        <p class="text-slate-400 text-lg">מהעמוד מוצר ועד תמונת לבוש — חוויה חלקה, ישירות בדפדפן, ללא אפליקציה.</p>
+      </div>
+      <div class="reveal relative">
+        <div class="parallax-blob pointer-events-none absolute -inset-6 bg-[radial-gradient(ellipse_at_center,rgb(16_185_129/0.14),transparent_70%)] blur-2xl" data-speed="-.15" aria-hidden="true"></div>
+        <video class="relative w-full rounded-2xl ring-1 ring-white/10 shadow-lift bg-slate-950"
+               src="pear-ad.mp4" controls playsinline preload="metadata" aria-label="סרטון הדגמה של PEAR"></video>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ MARKET RESEARCH · industry data + product potential ══════════ -->
+  <section id="voices" data-hud="נתוני שוק" class="max-w-6xl mx-auto px-5 sm:px-8 py-20 sm:py-28">
+    <div class="max-w-2xl mx-auto text-center mb-14 reveal">
+      <p class="text-xs font-mono font-semibold tracking-[0.2em] text-pear-600 uppercase mb-3">נתוני שוק</p>
+      <h2 data-split class="text-3xl sm:text-4xl font-extrabold text-slate-900 tracking-tight mb-4">מה שמחקרי השוק מראים</h2>
+      <p class="text-slate-500 text-lg">הפער בין המסך למציאות עולה למותגי אופנה ביוקר — וזו בדיוק הבעיה ש-PEAR נבנתה כדי לפתור.</p>
+    </div>
+
+    <!-- Industry-research stat cards (findings, not client results) -->
+    <div class="grid sm:grid-cols-3 gap-5 mb-8">
+      <div class="reveal rounded-2xl glass-dark text-white p-7 text-center">
+        <p class="font-mono text-4xl font-black text-pear-400 mb-2"><span class="stat-num" data-to="25" data-prefix="~" data-suffix="%">~25%</span></p>
+        <p class="text-sm text-slate-300">שיעור ההחזרות באופנה מקוונת — מהגבוהים באיקומרס</p>
+      </div>
+      <div class="reveal rounded-2xl glass-dark text-white p-7 text-center">
+        <p class="font-mono text-4xl font-black text-pear-400 mb-2">#1</p>
+        <p class="text-sm text-slate-300">אי-התאמת מידה היא סיבת ההחזרה המובילה בהלבשה</p>
+      </div>
+      <div class="reveal rounded-2xl glass-dark text-white p-7 text-center">
+        <p class="font-mono text-2xl font-black text-pear-400 mb-2 mt-3">Bracketing</p>
+        <p class="text-sm text-slate-300">קונים מזמינים כמה מידות ומחזירים את העודף — ונועלים מלאי מבוקש</p>
+      </div>
+    </div>
+
+    <!-- Product potential — forward-looking, focused on capability (no clients) -->
+    <div class="reveal rounded-3xl glass p-8 sm:p-10 text-center max-w-3xl mx-auto">
+      <p class="text-lg sm:text-xl text-slate-700 leading-relaxed font-medium">
+        PEAR הופכת את חוסר הוודאות הזה לביטחון:
+        <span class="text-pear-700 font-bold">מדידה חזותית מבוססת AI</span>
+        שמאפשרת לכל קונה לראות את הבגד על עצמו ולקבל את המידה המדויקת — עוד לפני התשלום.
+      </p>
+      <p class="text-xs font-mono tracking-widest text-slate-400 uppercase mt-6">הפוטנציאל · פחות החזרות · יותר המרות · קונים בטוחים</p>
+    </div>
+
+    <p class="text-center text-xs text-slate-400 mt-6 reveal">
+      * הנתונים לעיל מבוססים על מחקרי אופנה ואיקומרס מקובלים בתעשייה, לא על ביצועי לקוח.
+    </p>
+  </section>
+
+  <!-- ══════════ FINAL CTA ══════════ -->
+  <section id="cta" data-hud="סיום" class="relative overflow-hidden">
+    <!-- z-30 keeps the CTA copy ABOVE the fixed 3D layer: the pear parks centered
+         behind this headline for the finale -->
+    <div class="max-w-3xl mx-auto px-5 sm:px-8 py-20 sm:py-28 text-center relative z-30">
+      <h2 data-split class="text-3xl sm:text-5xl font-black text-slate-900 tracking-tight mb-4 reveal">מוכנים להוריד את אחוז ההחזרות?</h2>
+      <p class="text-slate-500 text-lg mb-9 reveal">שורת קוד אחת. חמש דקות. והלקוחות שלכם מודדים בבית.</p>
+      <div class="flex flex-wrap justify-center gap-3 reveal">
+        <button data-scroll="playground" class="cta-glow inline-flex items-center gap-2 rounded-xl bg-pear-600 text-white font-bold px-8 py-4 shadow-btn hover:bg-pear-700 hover:-translate-y-0.5 transition-all">
+          ✨ נסו את הסימולטור
+        </button>
+        <a href="#docs" data-nav="docs" class="nav-link inline-flex items-center rounded-xl glass text-slate-700 font-bold px-8 py-4 hover:-translate-y-0.5 transition-all">
+          למדריך ההטמעה ←
+        </a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ════════════════════════════════════════════════════════════════
+     VIEW 2 · WIDGET INTEGRATION GUIDE (developer docs)
+     ════════════════════════════════════════════════════════════════ -->
+<main id="view-docs" class="view" aria-label="מדריך הטמעת הוויג'ט">
+
+  <!-- Docs hero -->
+  <section class="border-b border-white/50">
+    <div class="max-w-3xl mx-auto px-5 sm:px-8 pt-20 pb-14 sm:pt-24 sm:pb-16">
+      <p class="text-xs font-mono font-semibold tracking-[0.2em] text-pear-600 uppercase mb-3">Developer Docs</p>
+      <h1 class="text-3xl sm:text-5xl font-black text-slate-900 tracking-tight mb-5">מדריך הטמעת הוויג'ט</h1>
+      <p class="text-lg text-slate-500 leading-relaxed">
+        הטמעת הוויג'ט של PEAR לוקחת <span class="font-semibold text-slate-700">פחות מ-5 דקות</span> ולא דורשת
+        שינויים בארכיטקטורת האתר. שלושה שלבים — והלקוחות שלכם מודדים.
+      </p>
+    </div>
+  </section>
+
+  <div class="max-w-3xl mx-auto px-5 sm:px-8 py-14 sm:py-16 space-y-14">
+
+    <!-- ── 01 · Requirements ── -->
+    <section class="reveal">
+      <div class="flex items-center gap-3 mb-5">
+        <span class="font-mono text-xs font-bold text-pear-600 bg-pear-50 border border-pear-100 rounded-md px-2 py-1">01</span>
+        <h2 class="text-xl sm:text-2xl font-extrabold text-slate-900 tracking-tight">הקדמה ודרישות מערכת</h2>
+      </div>
+      <div class="rounded-2xl glass p-7">
+        <p class="text-slate-600 mb-6">
+          הוויג'ט הוא סקריפט JavaScript קל-משקל שנטען אסינכרונית ואינו משפיע על מהירות האתר.
+          אין תלות בפלטפורמה — הוא עובד עם כל פלטפורמות האיקומרס:
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <span class="font-mono text-xs px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-200 text-slate-600">Shopify</span>
+          <span class="font-mono text-xs px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-200 text-slate-600">WooCommerce</span>
+          <span class="font-mono text-xs px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-200 text-slate-600">Magento</span>
+          <span class="font-mono text-xs px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-200 text-slate-600">Custom / פיתוח מותאם</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 02 · Steps + code blocks ── -->
+    <section class="reveal">
+      <div class="flex items-center gap-3 mb-5">
+        <span class="font-mono text-xs font-bold text-pear-600 bg-pear-50 border border-pear-100 rounded-md px-2 py-1">02</span>
+        <h2 class="text-xl sm:text-2xl font-extrabold text-slate-900 tracking-tight">שלבי ההטמעה</h2>
+      </div>
+
+      <div class="space-y-8">
+        <!-- Step 1: CDN -->
+        <div class="rounded-2xl glass overflow-hidden">
+          <div class="p-7 pb-5">
+            <h3 class="font-bold text-slate-900 text-lg mb-1.5">שלב 1 · הוספת סקריפט המערכת (CDN)</h3>
+            <p class="text-sm text-slate-500">הדביקו את השורה הבאה לפני תג <code class="font-mono text-xs bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5 text-slate-700" dir="ltr">&lt;/body&gt;</code> — פעם אחת, בכל עמודי המוצר.</p>
+          </div>
+          <div class="mx-7 mb-7 rounded-xl overflow-hidden border border-slate-800 bg-slate-950">
+            <div class="flex items-center justify-between px-4 py-2.5 bg-slate-900 border-b border-slate-800" dir="ltr">
+              <span class="font-mono text-[11px] text-slate-400 tracking-wider">index.html</span>
+              <button class="copy-btn font-mono text-[11px] font-semibold text-slate-300 bg-slate-800 hover:bg-slate-700 rounded-md px-3 py-1.5 transition-colors" data-copy="snippet-cdn">Copy</button>
+            </div>
+            <pre class="code-scroll p-5 text-[13px] leading-relaxed font-mono"><code id="snippet-cdn"><span class="text-slate-500">&lt;!-- PEAR Virtual Try-On SDK --&gt;</span>
+<span class="text-sky-300">&lt;script</span> <span class="text-emerald-300">src</span><span class="text-slate-400">=</span><span class="text-amber-200">"https://cdn.pear-tryon.com/sdk/v2/widget.js"</span> <span class="text-emerald-300">async</span><span class="text-sky-300">&gt;&lt;/script&gt;</span></code></pre>
+          </div>
+        </div>
+
+        <!-- Step 2: container -->
+        <div class="rounded-2xl glass overflow-hidden">
+          <div class="p-7 pb-5">
+            <h3 class="font-bold text-slate-900 text-lg mb-1.5">שלב 2 · מיקום כפתור המדידה בדף המוצר</h3>
+            <p class="text-sm text-slate-500">הניחו את הקונטיינר בכל מקום בעמוד המוצר — לרוב מתחת לבורר המידות. הוויג'ט יעצב את עצמו בהתאם למקום.</p>
+          </div>
+          <div class="mx-7 mb-7 rounded-xl overflow-hidden border border-slate-800 bg-slate-950">
+            <div class="flex items-center justify-between px-4 py-2.5 bg-slate-900 border-b border-slate-800" dir="ltr">
+              <span class="font-mono text-[11px] text-slate-400 tracking-wider">product-page.html</span>
+              <button class="copy-btn font-mono text-[11px] font-semibold text-slate-300 bg-slate-800 hover:bg-slate-700 rounded-md px-3 py-1.5 transition-colors" data-copy="snippet-container">Copy</button>
+            </div>
+            <pre class="code-scroll p-5 text-[13px] leading-relaxed font-mono"><code id="snippet-container"><span class="text-sky-300">&lt;div</span>
+  <span class="text-emerald-300">id</span><span class="text-slate-400">=</span><span class="text-amber-200">"pear-widget-container"</span>
+  <span class="text-emerald-300">data-product-id</span><span class="text-slate-400">=</span><span class="text-amber-200">"12345"</span>
+  <span class="text-emerald-300">data-store-id</span><span class="text-slate-400">=</span><span class="text-amber-200">"YOUR_STORE_ID"</span><span class="text-sky-300">&gt;
+&lt;/div&gt;</span></code></pre>
+          </div>
+        </div>
+
+        <!-- Step 3: init -->
+        <div class="rounded-2xl glass overflow-hidden">
+          <div class="p-7 pb-5">
+            <h3 class="font-bold text-slate-900 text-lg mb-1.5">שלב 3 · אתחול והגדרות מותאמות אישית</h3>
+            <p class="text-sm text-slate-500">שליטה מלאה על שפה, ערכת נושא, טקסט הכפתור ו-callbacks — הכל מאובייקט קונפיגורציה אחד.</p>
+          </div>
+          <div class="mx-7 mb-7 rounded-xl overflow-hidden border border-slate-800 bg-slate-950">
+            <div class="flex items-center justify-between px-4 py-2.5 bg-slate-900 border-b border-slate-800" dir="ltr">
+              <span class="font-mono text-[11px] text-slate-400 tracking-wider">pear-init.js</span>
+              <button class="copy-btn font-mono text-[11px] font-semibold text-slate-300 bg-slate-800 hover:bg-slate-700 rounded-md px-3 py-1.5 transition-colors" data-copy="snippet-init">Copy</button>
+            </div>
+            <pre class="code-scroll p-5 text-[13px] leading-relaxed font-mono"><code id="snippet-init"><span class="text-slate-300">window</span><span class="text-slate-400">.</span><span class="text-slate-300">PearWidget</span><span class="text-slate-400">.</span><span class="text-sky-300">init</span><span class="text-slate-400">({</span>
+  <span class="text-emerald-300">storeId</span><span class="text-slate-400">:</span> <span class="text-amber-200">'YOUR_STORE_ID'</span><span class="text-slate-400">,</span>
+  <span class="text-emerald-300">theme</span><span class="text-slate-400">:</span> <span class="text-amber-200">'light'</span><span class="text-slate-400">,</span>          <span class="text-slate-500">// 'light' | 'dark'</span>
+  <span class="text-emerald-300">locale</span><span class="text-slate-400">:</span> <span class="text-amber-200">'he'</span><span class="text-slate-400">,</span>
+  <span class="text-emerald-300">buttonText</span><span class="text-slate-400">:</span> <span class="text-amber-200">'מדוד עכשיו עם AI'</span><span class="text-slate-400">,</span>
+
+  <span class="text-slate-500">// נקרא כשהאלגוריתם מסיים לחשב מידה מומלצת</span>
+  <span class="text-sky-300">onSizeRecommended</span><span class="text-slate-400">:</span> <span class="text-slate-400">(</span><span class="text-slate-300">result</span><span class="text-slate-400">) =&gt; {</span>
+    <span class="text-slate-300">console</span><span class="text-slate-400">.</span><span class="text-sky-300">log</span><span class="text-slate-400">(</span><span class="text-amber-200">'המידה המומלצת:'</span><span class="text-slate-400">,</span> <span class="text-slate-300">result</span><span class="text-slate-400">.</span><span class="text-slate-300">size</span><span class="text-slate-400">);</span>
+  <span class="text-slate-400">},</span>
+<span class="text-slate-400">});</span></code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 03 · Preview ── -->
+    <section class="reveal">
+      <div class="flex items-center gap-3 mb-5">
+        <span class="font-mono text-xs font-bold text-pear-600 bg-pear-50 border border-pear-100 rounded-md px-2 py-1">03</span>
+        <h2 class="text-xl sm:text-2xl font-extrabold text-slate-900 tracking-tight">תצוגה מקדימה</h2>
+      </div>
+
+      <div class="rounded-2xl border-2 border-dashed border-slate-300 bg-white p-8 sm:p-10">
+        <p class="text-center text-xs font-mono tracking-widest text-slate-400 uppercase mb-8">כך ייראה הכפתור בדף המוצר שלכם</p>
+        <div class="max-w-sm mx-auto rounded-2xl glass p-6">
+          <div class="h-40 rounded-xl bg-slate-100 mb-5 flex items-center justify-center text-slate-300">
+            <svg class="w-12 h-12" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M18 12h.008v.008H18V12zm-1.5-9H7.5A2.25 2.25 0 005.25 5.25v13.5A2.25 2.25 0 007.5 21h9a2.25 2.25 0 002.25-2.25V5.25A2.25 2.25 0 0016.5 3z"/></svg>
+          </div>
+          <p class="font-bold text-slate-900 mb-0.5">חולצת אוברסייז · שחור</p>
+          <p class="text-sm text-slate-400 mb-5">₪129.90</p>
+          <button id="previewBtn" class="cta-glow w-full inline-flex items-center justify-center gap-2 rounded-xl bg-pear-600 text-white font-bold px-6 py-3.5 shadow-btn hover:bg-pear-700 hover:-translate-y-0.5 active:translate-y-0 transition-all">
+            ✨ מדוד על הגוף שלך עכשיו
+          </button>
+          <p id="previewNote" class="text-center text-xs text-slate-400 mt-3 opacity-0 transition-opacity duration-300">
+            כאן נפתח חלון המדידה של PEAR — בזמן אמת, בלי לעזוב את העמוד
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Support note -->
+    <section class="reveal">
+      <div class="rounded-2xl bg-pear-50 border border-pear-100 px-7 py-6 flex items-start gap-4">
+        <span class="text-xl leading-none mt-0.5">💡</span>
+        <p class="text-sm text-slate-600 leading-relaxed">
+          אין לכם עדיין <span class="font-mono text-xs bg-white border border-pear-100 rounded px-1.5 py-0.5" dir="ltr">STORE_ID</span>?
+          <a href="mailto:itaiarazi99@gmail.com" class="font-semibold text-pear-700 underline underline-offset-2 hover:text-pear-600">צרו קשר</a>
+          ונקים לכם חשבון תוך יום עסקים.
+        </p>
+      </div>
+    </section>
+  </div>
+</main>
+
+<!-- ══════════ FOOTER ══════════ -->
+<footer class="border-t border-white/50 glass">
+  <div class="max-w-6xl mx-auto px-5 sm:px-8 py-10 flex flex-col sm:flex-row items-center justify-between gap-3">
+    <span class="font-mono font-bold text-slate-900"><span class="pear-wordmark">PEAR</span><span class="text-pear-500">.</span></span>
+    <p class="text-xs text-slate-400">© 2026 PEAR Virtual Try-On · כל הזכויות שמורות</p>
+  </div>
+</footer>
+
+<!-- Toast (copy feedback etc.) -->
+<div id="toast" class="fixed bottom-6 inset-x-0 mx-auto w-max max-w-[90vw] z-[60] rounded-xl bg-slate-900 text-white text-sm font-semibold px-5 py-3 shadow-lift opacity-0 translate-y-3 transition-all duration-300 pointer-events-none" role="status"></div>
+
+<!-- GSAP + ScrollTrigger — the cinematic scroll engine -->
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
+
+<script>
+/* ════════════════════════════════════════════════════════════════
+   PEAR landing · vanilla JS
+   Blocks: 1) view routing  2) smooth-scroll CTAs  3) clipboard
+           4) toast  5) docs preview  6) size simulator
+           7) 3D tilt  8) scroll HUD  9) scroll reveal
+           9.5) GSAP cinematics  10) boot
+   ════════════════════════════════════════════════════════════════ */
+
+/* ── 1 · View routing (#overview / #docs) ─────────────────────── */
+const VIEWS = ['overview', 'docs'];
+
+function currentView() {
+  const v = location.hash.replace('#', '');
+  return VIEWS.includes(v) ? v : 'overview';
+}
+
+function renderView(view, { scroll = true } = {}) {
+  VIEWS.forEach((v) => document.getElementById('view-' + v).classList.toggle('active', v === view));
+  document.querySelectorAll('[data-nav]').forEach((el) => {
+    if (!el.classList.contains('nav-tab')) return;
+    if (el.dataset.nav === view) el.setAttribute('aria-current', 'page');
+    else el.removeAttribute('aria-current');
+  });
+  if (scroll) window.scrollTo(0, 0);
+  // Hide the fixed 3D layer + HUD while reading docs; re-measure triggers on return.
+  document.body.classList.toggle('docs-active', view === 'docs');
+  if (window.ScrollTrigger) setTimeout(() => ScrollTrigger.refresh(), 60);
+  revealInit();                       // observe the fresh view's .reveal elements
+}
+
+/* ── 2 · Smooth-scroll CTA buttons (data-scroll="sectionId") ──── */
+document.querySelectorAll('[data-scroll]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const target = () => document.getElementById(btn.dataset.scroll);
+    if (currentView() !== 'overview') {          // sections live in view 1
+      location.hash = 'overview';
+      setTimeout(() => target()?.scrollIntoView({ behavior: 'smooth' }), 60);
+    } else {
+      target()?.scrollIntoView({ behavior: 'smooth' });
+    }
+  });
+});
+
+/* ── 3 · Copy-to-clipboard for code blocks ────────────────────── */
+document.querySelectorAll('.copy-btn').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    const code = document.getElementById(btn.dataset.copy);
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code.innerText);
+      btn.textContent = 'Copied ✓';
+      showToast('הקוד הועתק ללוח ✓');
+      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    } catch {
+      showToast('ההעתקה נכשלה — העתיקו ידנית');
+    }
+  });
+});
+
+/* ── 4 · Toast ────────────────────────────────────────────────── */
+let toastTimer = null;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.remove('opacity-0', 'translate-y-3');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.add('opacity-0', 'translate-y-3'), 2200);
+}
+
+/* ── 5 · Docs widget preview ──────────────────────────────────── */
+document.getElementById('previewBtn').addEventListener('click', () => {
+  document.getElementById('previewNote').classList.remove('opacity-0');
+  showToast('✨ בגרסה החיה: חלון המדידה נפתח כאן');
+});
+
+/* ── 6 · Size simulator (the playground) ──────────────────────────
+   A miniature, honest imitation of the real engine's UX: inputs →
+   brief "AI is measuring" beat → size + confidence. The sizing here
+   is a simple BMI banding + per-garment adjustment (demo only). */
+const hIn = document.getElementById('hIn'), wIn = document.getElementById('wIn');
+const hVal = document.getElementById('hVal'), wVal = document.getElementById('wVal');
+let simGarment = 'tee';
+
+/* live value chips pulse as you drag (GSAP-optional) */
+const pulse = (el) => {
+  if (window.gsap) gsap.fromTo(el, { scale: 1.28, color: '#059669', display: 'inline-block' },
+                                   { scale: 1, clearProps: 'color', duration: .45, ease: 'power3.out' });
+};
+hIn.addEventListener('input', () => { hVal.textContent = hIn.value; pulse(hVal.parentElement); });
+wIn.addEventListener('input', () => { wVal.textContent = wIn.value; pulse(wVal.parentElement); });
+
+document.getElementById('garmentChips').addEventListener('click', (e) => {
+  const chip = e.target.closest('.g-chip');
+  if (!chip) return;
+  simGarment = chip.dataset.g;
+  document.querySelectorAll('.g-chip').forEach((c) => {
+    const active = c === chip;
+    c.classList.toggle('bg-pear-600', active);
+    c.classList.toggle('text-white', active);
+    c.classList.toggle('border-pear-600', active);
+    c.classList.toggle('bg-white', !active);
+    c.classList.toggle('text-slate-600', !active);
+    c.classList.toggle('border-slate-200', !active);
+  });
+});
+
+function computeSize(h, w, garment) {
+  const bmi = w / ((h / 100) ** 2);
+  const bands = [ [18.5, 0], [22.5, 1], [26, 2], [30, 3], [34, 4] ];  // → idx into SIZES
+  const SIZES = ['S', 'M', 'L', 'XL', 'XXL', '3XL'];
+  let idx = 5;
+  for (const [limit, i] of bands) if (bmi < limit) { idx = i; break; }
+  if (garment === 'tee'   && idx > 0) idx -= 0;              // oversize cut — true to size
+  if (garment === 'jeans' && bmi > 24) idx += 0;             // slim cut — keep strict
+  if (garment === 'dress' && idx > 0 && bmi < 20) idx -= 1;  // midi runs large
+  idx = Math.max(0, Math.min(SIZES.length - 1, idx));
+  const conf = Math.round(88 + Math.random() * 9);           // demo confidence 88–97%
+  return { size: SIZES[idx], conf };
+}
+
+const NOTES = {
+  tee:   'גזרת אוברסייז — ההמלצה שומרת על נפילה רפויה בלי להיראות ענקית.',
+  jeans: 'גזרת סלים — ההמלצה מקפידה על היקף מותן מדויק לפני אורך.',
+  dress: 'שמלת מידי — נלקח בחשבון שהדגם נוטה למידות גדולות.',
+};
+
+document.getElementById('simBtn').addEventListener('click', () => {
+  const idle = document.getElementById('simIdle'),
+        busy = document.getElementById('simBusy'),
+        done = document.getElementById('simDone');
+  idle.classList.add('hidden');  idle.classList.remove('flex');
+  done.classList.add('hidden');  done.classList.remove('flex');
+  busy.classList.remove('hidden'); busy.classList.add('flex');
+
+  setTimeout(() => {                                          // the "AI beat"
+    const { size, conf } = computeSize(+hIn.value, +wIn.value, simGarment);
+    busy.classList.add('hidden'); busy.classList.remove('flex');
+    done.classList.remove('hidden'); done.classList.add('flex');
+    const sizeEl = document.getElementById('simSize'), confTxt = document.getElementById('simConfTxt');
+    sizeEl.textContent = size;
+    document.getElementById('simNote').textContent = NOTES[simGarment];
+    document.getElementById('simBase').textContent = 'הערכת AI · הדגמה';
+    const bar = document.getElementById('simConf');
+    if (window.gsap) {
+      /* elastic size pop + glowing count-up + liquid bar */
+      gsap.fromTo(sizeEl, { scale: .2, rotate: -10, opacity: 0 },
+                          { scale: 1, rotate: 0, opacity: 1, duration: .9, ease: 'elastic.out(1, .5)' });
+      const cs = { v: 0 };
+      gsap.to(cs, { v: conf, duration: 1.1, ease: 'power2.out',
+                    onUpdate: () => confTxt.textContent = Math.round(cs.v) + '%' });
+      gsap.fromTo(bar, { width: '0%' }, { width: conf + '%', duration: 1.2, ease: 'power4.out' });
+    } else {
+      confTxt.textContent = conf + '%';
+      bar.style.width = '0%';
+      requestAnimationFrame(() => requestAnimationFrame(() => bar.style.width = conf + '%'));
+    }
+  }, 900);
+});
+
+/* ── 7 · Hero mockup 3D tilt (mouse-driven) ───────────────────── */
+const tiltCard = document.getElementById('tiltCard');
+const REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (tiltCard && !REDUCED) {
+  const scene = tiltCard.parentElement;
+  scene.addEventListener('mousemove', (e) => {
+    const r = tiltCard.getBoundingClientRect();
+    const dx = (e.clientX - r.left) / r.width - 0.5;   // -0.5 → 0.5
+    const dy = (e.clientY - r.top) / r.height - 0.5;
+    tiltCard.style.setProperty('--ry', (dx * 10).toFixed(2) + 'deg');
+    tiltCard.style.setProperty('--rx', (-dy * 8).toFixed(2) + 'deg');
+  });
+  scene.addEventListener('mouseleave', () => {
+    tiltCard.style.setProperty('--rx', '0deg');
+    tiltCard.style.setProperty('--ry', '0deg');
+  });
+}
+
+/* ── 8 · Scroll HUD (ring gauge + % + chapter) + navbar elevation ─
+   One passive, rAF-throttled scroll listener drives everything. */
+const headerEl = document.querySelector('header');
+const hudPct = document.getElementById('hudPct');
+const hudRing = document.getElementById('hudRing');
+const HUD_C = 100.5;                       // 2πr of the ring circle (r=16)
+let scrollTicking = false;
+function onScrollFx() {
+  scrollTicking = false;
+  const max = document.documentElement.scrollHeight - innerHeight;
+  const p = max > 0 ? Math.min(1, Math.max(0, scrollY / max)) : 0;
+  if (hudPct) hudPct.textContent = Math.round(p * 100);
+  if (hudRing) hudRing.style.strokeDashoffset = (HUD_C * (1 - p)).toFixed(1);
+  if (headerEl) headerEl.classList.toggle('is-scrolled', scrollY > 8);
+}
+window.addEventListener('scroll', () => {
+  if (!scrollTicking) { scrollTicking = true; requestAnimationFrame(onScrollFx); }
+}, { passive: true });
+onScrollFx();
+
+/* ── 9 · Scroll reveal (visibility guaranteed by safety sweep) ── */
+const io = ('IntersectionObserver' in window)
+  ? new IntersectionObserver((entries) => {
+      entries.forEach((e) => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
+    }, { threshold: 0.12 })
+  : null;
+
+function revealInit() {
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  document.querySelectorAll('.view.active .reveal:not(.in)').forEach((el, i) => {
+    // Sibling stagger: cards inside the same row cascade in 90ms apart.
+    el.style.transitionDelay = ((i % 3) * 90) + 'ms';
+    if (!io || el.getBoundingClientRect().top < vh) el.classList.add('in');
+    else io.observe(el);
+  });
+}
+function revealAll() {
+  document.querySelectorAll('.reveal:not(.in)').forEach((el) => el.classList.add('in'));
+}
+
+/* ── 9.5 · GSAP cinematics ──────────────────────────────────────
+   Split-word headline reveals, glowing counters, magnetic CTAs,
+   cursor-glow + tilt on bento cards, parallax auras, a pinned
+   scale-up on the demo video, and the HUD chapter tracker.
+   Everything here is decoration: wrapped in try/catch and skipped
+   under reduced motion or if the GSAP CDN is unavailable, so the
+   page's core functionality can never depend on it. */
+try {
+  const GSAP_ON = !REDUCED && window.gsap && window.ScrollTrigger;
+  if (GSAP_ON) {
+    gsap.registerPlugin(ScrollTrigger);
+
+    /* Split every [data-split] headline into word spans (nested colored
+       spans survive — we walk text nodes recursively), then unfold each
+       word as the headline scrolls in. */
+    document.querySelectorAll('#view-overview [data-split]').forEach((el) => {
+      (function walk(node) {
+        [...node.childNodes].forEach((n) => {
+          if (n.nodeType === 3 && n.textContent.trim()) {
+            const frag = document.createDocumentFragment();
+            n.textContent.split(/(\s+)/).forEach((part) => {
+              if (!part) return;
+              if (/^\s+$/.test(part)) frag.appendChild(document.createTextNode(part));
+              else { const s = document.createElement('span'); s.className = 'w'; s.textContent = part; frag.appendChild(s); }
+            });
+            n.replaceWith(frag);
+          } else if (n.nodeType === 1) walk(n);
+        });
+      })(el);
+      const trig = { trigger: el, start: 'top 84%', once: true };
+      gsap.fromTo(el.querySelectorAll('.w'),
+        { yPercent: 115, opacity: 0, rotateX: -45 },
+        { yPercent: 0, opacity: 1, rotateX: 0, duration: .9, ease: 'power4.out',
+          stagger: .05, transformOrigin: '50% 100%', scrollTrigger: trig });
+
+      /* The eyebrow label (previous sibling) slides in just ahead of the words. */
+      const eyebrow = el.previousElementSibling;
+      if (eyebrow && eyebrow.tagName === 'P')
+        gsap.fromTo(eyebrow, { x: 26, opacity: 0 },
+          { x: 0, opacity: 1, duration: .6, ease: 'power2.out', scrollTrigger: trig });
+
+      /* The subtitle (next sibling) "opens up" — a soft upward mask-wipe.
+         Skip ones already handled by the .reveal system to avoid double-play. */
+      const sub = el.nextElementSibling;
+      if (sub && sub.tagName === 'P' && !sub.classList.contains('reveal'))
+        gsap.fromTo(sub,
+          { yPercent: 45, opacity: 0, clipPath: 'inset(0% 0% 100% 0%)' },
+          { yPercent: 0, opacity: 1, clipPath: 'inset(0% 0% 0% 0%)',
+            duration: 1.05, ease: 'power3.out', delay: .28, scrollTrigger: trig });
+    });
+
+    /* Glowing stat counters — numbers count up when they enter view. */
+    document.querySelectorAll('.stat-num').forEach((el) => {
+      const to = parseFloat(el.dataset.to), dec = +(el.dataset.dec || 0);
+      const pre = el.dataset.prefix || '', suf = el.dataset.suffix || '';
+      const st = { v: 0 };
+      gsap.to(st, { v: to, duration: 1.6, ease: 'power2.out',
+        scrollTrigger: { trigger: el, start: 'top 88%', once: true },
+        onUpdate: () => { el.textContent = pre + st.v.toFixed(dec) + suf; } });
+    });
+
+    /* Magnetic primary CTAs — the button leans toward the cursor. */
+    document.querySelectorAll('.cta-glow').forEach((btn) => {
+      btn.addEventListener('mousemove', (e) => {
+        const r = btn.getBoundingClientRect();
+        gsap.to(btn, { x: (e.clientX - r.left - r.width / 2) * .18,
+                       y: (e.clientY - r.top - r.height / 2) * .3,
+                       duration: .35, ease: 'power2.out' });
+      });
+      btn.addEventListener('mouseleave', () =>
+        gsap.to(btn, { x: 0, y: 0, duration: .7, ease: 'elastic.out(1, .45)' }));
+    });
+
+    /* Bento: glow follows the cursor (CSS vars) + gentle 3D tilt. */
+    document.querySelectorAll('.bento').forEach((card) => {
+      card.addEventListener('mousemove', (e) => {
+        const r = card.getBoundingClientRect();
+        const px = (e.clientX - r.left) / r.width, py = (e.clientY - r.top) / r.height;
+        card.style.setProperty('--gx', (px * 100) + '%');
+        card.style.setProperty('--gy', (py * 100) + '%');
+        gsap.to(card, { rotateY: (px - .5) * 6, rotateX: (.5 - py) * 6, y: -4,
+                        transformPerspective: 900, duration: .4, ease: 'power2.out' });
+      });
+      card.addEventListener('mouseleave', () =>
+        gsap.to(card, { rotateX: 0, rotateY: 0, y: 0, duration: .6, ease: 'power3.out' }));
+    });
+
+    /* Depth: background auras drift slower than the content (parallax). */
+    document.querySelectorAll('.parallax-blob').forEach((blob) => {
+      gsap.to(blob, { yPercent: (+(blob.dataset.speed || .25)) * 100, ease: 'none',
+        scrollTrigger: { trigger: blob.closest('section') || blob,
+                         start: 'top bottom', end: 'bottom top', scrub: true } });
+    });
+
+    /* Cinematic pin: the demo band holds while the video scales to full size. */
+    const demoSec = document.getElementById('demo');
+    if (demoSec && matchMedia('(min-width: 1024px)').matches) {
+      gsap.fromTo(demoSec.querySelector('video'),
+        { scale: .9, transformOrigin: 'center' },
+        { scale: 1, ease: 'none',
+          scrollTrigger: { trigger: demoSec, start: 'top top', end: '+=55%',
+                           scrub: .4, pin: true } });
+    }
+
+    /* HUD chapter label follows the section under the viewport center. */
+    document.querySelectorAll('#view-overview [data-hud]').forEach((sec) => {
+      ScrollTrigger.create({ trigger: sec, start: 'top 55%', end: 'bottom 55%',
+        onToggle: (self) => {
+          if (self.isActive) document.getElementById('hudLabel').textContent = sec.dataset.hud;
+        } });
+    });
+
+    /* Keep trigger positions honest once late media (videos/fonts) resize the page. */
+    addEventListener('load', () => ScrollTrigger.refresh());
+    document.querySelectorAll('video').forEach((v) =>
+      v.addEventListener('loadedmetadata', () => ScrollTrigger.refresh()));
+  }
+} catch (e) { console.warn('[PEAR] cinematics skipped:', e?.message || e); }
+
+/* ── 10 · Boot — after ALL definitions above ──────────────────── */
+window.addEventListener('hashchange', () => renderView(currentView()));
+renderView(currentView(), { scroll: false });
+setTimeout(revealAll, 1500);          // safety net — nothing may remain invisible
+</script>
+
+<!-- ════════════════════════════════════════════════════════════════
+     3D SCENE · a PHOTOREAL pear that TRAVELS the page with the scroll.
+     Realism stack (all procedural — zero asset downloads):
+       • high-res LatheGeometry (128 segs) + organic vertex noise, so the
+         silhouette is asymmetric like real fruit;
+       • canvas-generated skin: green gradient + russet sun-blush +
+         thousands of lenticel speckles → color, bump AND roughness maps;
+       • MeshPhysicalMaterial with sheen (subsurface feel) + light
+         clearcoat (waxy skin), lit by a PMREM RoomEnvironment (IBL) and
+         ACES filmic tone mapping — the PBR combo that reads "real";
+       • bent stem (tube along a curve) + a leaf.
+     Travel: GSAP ScrollTrigger waypoints per section fly the pear across
+     the FIXED full-viewport canvas as each chapter enters; mouse leans
+     it, scroll spins it. DPR capped, renders only when visible; skipped
+     under reduced-motion / mobile / docs view / no WebGL.
+     ════════════════════════════════════════════════════════════════ -->
+<script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+try {
+  const REDUCED3D = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const stage = document.getElementById('pearStage');
+  if (stage && !REDUCED3D) {
+    const THREE = await import('three');
+    const { RoomEnvironment } = await import('three/addons/environments/RoomEnvironment.js');
+
+    /* ── renderer: full-viewport fixed layer, filmic tone mapping ── */
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    stage.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 50);
+    camera.position.set(0, 0, 7.5);
+
+    /* ── lighting: image-based environment (the realism backbone) +
+         a warm key and a cool rim for shape definition ── */
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
+    scene.add(new THREE.HemisphereLight(0xf8fafc, 0xdbe7d0, 0.35));
+    const key = new THREE.DirectionalLight(0xfff4e0, 1.15); key.position.set(3.5, 5, 4);  scene.add(key);
+    const rim = new THREE.DirectionalLight(0xcdeedd, 0.45); rim.position.set(-5, -1, -4); scene.add(rim);
+
+    /* ── procedural pear skin: one 1024px canvas paints the color map
+         (green gradient + russet sun-blush + ~4000 lenticel speckles),
+         a second paints the matching bump/roughness map ── */
+    function makeSkin() {
+      const col = document.createElement('canvas'); col.width = col.height = 1024;
+      const cx = col.getContext('2d');
+      const grad = cx.createLinearGradient(0, 0, 0, 1024);
+      grad.addColorStop(0, '#b4c554'); grad.addColorStop(0.45, '#9cba4b'); grad.addColorStop(1, '#7ba03e');
+      cx.fillStyle = grad; cx.fillRect(0, 0, 1024, 1024);
+      const blush = cx.createRadialGradient(690, 400, 40, 690, 400, 430);
+      blush.addColorStop(0, 'rgba(193,118,58,0.5)'); blush.addColorStop(1, 'rgba(193,118,58,0)');
+      cx.fillStyle = blush; cx.fillRect(0, 0, 1024, 1024);
+
+      const bmp = document.createElement('canvas'); bmp.width = bmp.height = 1024;
+      const bx = bmp.getContext('2d');
+      bx.fillStyle = '#8a8a8a'; bx.fillRect(0, 0, 1024, 1024);
+
+      for (let i = 0; i < 4200; i++) {                       // lenticels
+        const x = Math.random() * 1024, y = Math.random() * 1024, r = 0.6 + Math.random() * 1.6;
+        cx.fillStyle = `rgba(121,86,44,${0.08 + Math.random() * 0.2})`;
+        cx.beginPath(); cx.arc(x, y, r, 0, 7); cx.fill();
+        bx.fillStyle = Math.random() > 0.5 ? 'rgba(200,200,200,0.5)' : 'rgba(60,60,60,0.45)';
+        bx.beginPath(); bx.arc(x, y, r, 0, 7); bx.fill();
+      }
+      for (let i = 0; i < 240; i++) {                        // soft mottling
+        const x = Math.random() * 1024, y = Math.random() * 1024, r = 10 + Math.random() * 36;
+        cx.fillStyle = `rgba(${Math.random() > 0.5 ? '176,196,90' : '116,150,58'},0.05)`;
+        cx.beginPath(); cx.arc(x, y, r, 0, 7); cx.fill();
+      }
+      const mk = (c) => { const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping;
+                          t.anisotropy = renderer.capabilities.getMaxAnisotropy(); return t; };
+      const map = mk(col);
+      map.colorSpace = THREE.SRGBColorSpace;   // CRITICAL: without this the greens wash out to pale
+      return { map, bump: mk(bmp), bumpCanvas: bmp };
+    }
+    const skin = makeSkin();
+
+    /* Derive a proper TANGENT-SPACE NORMAL MAP from the speckle/bump canvas
+       (Sobel gradients → per-texel surface normal). Real normals catch the
+       lights far more convincingly than a scalar bumpScale — this is the main
+       lift toward a photoreal skin without shipping a scanned asset. */
+    function makeNormalMap(srcCanvas, strength) {
+      const w = srcCanvas.width, h = srcCanvas.height;
+      const s = srcCanvas.getContext('2d').getImageData(0, 0, w, h).data;
+      const out = document.createElement('canvas'); out.width = w; out.height = h;
+      const octx = out.getContext('2d'); const d = octx.createImageData(w, h);
+      const g = (x, y) => s[(((y + h) % h) * w + ((x + w) % w)) * 4] / 255;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const dx = (g(x - 1, y) - g(x + 1, y)) * strength;
+        const dy = (g(x, y - 1) - g(x, y + 1)) * strength;
+        const len = Math.hypot(dx, dy, 1), i = (y * w + x) * 4;
+        d.data[i]     = (dx / len * 0.5 + 0.5) * 255;
+        d.data[i + 1] = (dy / len * 0.5 + 0.5) * 255;
+        d.data[i + 2] = (1 / len * 0.5 + 0.5) * 255;
+        d.data[i + 3] = 255;
+      }
+      octx.putImageData(d, 0, 0);
+      const t = new THREE.CanvasTexture(out); t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      return t;
+    }
+    skin.normal = makeNormalMap(skin.bumpCanvas, 3.0);
+
+    /* ── geometry: high-res lathe + organic vertex noise (asymmetry) ── */
+    const PROFILE = [
+      [0.00, -1.00], [0.34, -0.97], [0.58, -0.82], [0.70, -0.55],
+      [0.66, -0.22], [0.52,  0.08], [0.38,  0.34], [0.28,  0.58],
+      [0.22,  0.80], [0.16,  0.98], [0.00,  1.04],
+    ].map(([r, y]) => new THREE.Vector2(r, y));
+    const bodyGeo = new THREE.LatheGeometry(PROFILE, 128);
+    const pos = bodyGeo.attributes.position;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      const n = Math.sin(v.y * 3.1 + v.x * 2.2) * Math.cos(v.z * 2.7) * 0.016
+              + Math.sin(v.x * 9 + v.y * 7) * 0.006;
+      v.multiplyScalar(1 + n);
+      pos.setXYZ(i, v.x, v.y, v.z);
+    }
+    bodyGeo.computeVertexNormals();
+
+    const skinMat = new THREE.MeshPhysicalMaterial({
+      map: skin.map,
+      normalMap: skin.normal, normalScale: new THREE.Vector2(0.55, 0.55),  // real relief
+      roughnessMap: skin.bump, roughness: 0.5,
+      envMapIntensity: 1.15,                                // pick up the studio reflections
+      clearcoat: 0.28, clearcoatRoughness: 0.45,           // waxy skin, not plastic
+      sheen: 0.4, sheenColor: 0xe6efc4, sheenRoughness: 0.55, // faked subsurface softness
+    });
+
+    /* bent stem: tube along a curve; leaf: a flat shape with both sides lit */
+    const stemCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 1.0, 0), new THREE.Vector3(0.05, 1.22, 0.02), new THREE.Vector3(0.17, 1.4, 0.06),
+    ]);
+    const stemGeo = new THREE.TubeGeometry(stemCurve, 12, 0.042, 8);
+    const stemMat = new THREE.MeshStandardMaterial({ color: 0x6b4a2b, roughness: 0.9 });
+    const leafShape = new THREE.Shape();
+    leafShape.moveTo(0, 0);
+    leafShape.bezierCurveTo(0.16, 0.1, 0.3, 0.32, 0.14, 0.52);
+    leafShape.bezierCurveTo(0.0, 0.42, -0.06, 0.18, 0, 0);
+    const leafGeo = new THREE.ShapeGeometry(leafShape, 12);
+    const leafMat = new THREE.MeshPhysicalMaterial({ color: 0x5a7d2f, roughness: 0.6, sheen: 0.5, side: THREE.DoubleSide });
+
+    function makePear(scale) {
+      const g = new THREE.Group();
+      g.add(new THREE.Mesh(bodyGeo, skinMat));
+      g.add(new THREE.Mesh(stemGeo, stemMat));
+      const leaf = new THREE.Mesh(leafGeo, leafMat);
+      leaf.position.set(0.06, 1.18, 0.03);
+      leaf.rotation.set(-0.5, 0.3, -0.9);
+      g.add(leaf);
+      g.scale.setScalar(scale);
+      return g;
+    }
+
+    /* ── the traveling hero pear + two hero-only companions ── */
+    const pear = makePear(0.72);
+    pear.position.set(-2.9, 0.4, 0);
+    scene.add(pear);
+
+    const compA = makePear(0.36); compA.position.set(-3.7, -1.5, -2);
+    const compB = makePear(0.24); compB.position.set(6.1, 2.5, -2.6);
+    scene.add(compA, compB);
+
+    /* ── scroll-driven trajectory: one waypoint per chapter; GSAP eases the
+         shared state there whenever a section takes the stage. Through the
+         reading sections the pear sits far out in the SIDE GUTTER (|x|≈4.3,
+         small scale) so it peeks in from the margin without covering text;
+         only the hero and the finale bring it in close. Spins are slow
+         (≈0.1 rad/s) so it drifts like real fruit, never a CGI top. ── */
+    const state = { x: -2.9, y: 0.4, s: 0.72, spin: 0.10 };
+    const WPS = [
+      ['hero',       -2.9,  0.40, 0.72, 0.10],
+      ['platform',    4.3,  0.05, 0.50, 0.09],  // gutter accent, right margin
+      ['playground', -4.3,  0.05, 0.52, 0.13],  // gutter accent, left margin
+      ['demo',        4.3, -0.10, 0.44, 0.08],
+      ['voices',     -4.3,  0.05, 0.48, 0.09],
+      ['cta',         0.0,  0.35, 1.05, 0.06],  // calm centered finale behind the headline
+    ];
+    if (window.gsap && window.ScrollTrigger) {
+      gsap.registerPlugin(ScrollTrigger);
+      /* Scroll-SCRUBBED travel: each section owns a segment that eases `state`
+         from the previous waypoint to its own as that section scrolls up through
+         the viewport. Because the tween is scrubbed (tied to scroll position, not
+         a fixed clock), the pear tracks the scrollbar DIRECTLY — a fast fling drags
+         it along in real time instead of leaving it frozen while a timed tween
+         plays catch-up. `scrub: 0.8` keeps a soft ~0.8s weight without lag-to-a-stop. */
+      for (let i = 1; i < WPS.length; i++) {
+        const [id, x, y, s, spin] = WPS[i];
+        const [, px, py, ps, pspin] = WPS[i - 1];
+        const el = document.getElementById(id);
+        if (!el) continue;
+        gsap.fromTo(state,
+          { x: px, y: py, s: ps, spin: pspin },
+          { x, y, s, spin, ease: 'none', immediateRender: false,
+            scrollTrigger: { trigger: el, start: 'top 78%', end: 'top 38%', scrub: 0.8 } });
+      }
+      /* companions belong to the hero only — shrink away when it exits */
+      ScrollTrigger.create({
+        trigger: '#hero', start: 'bottom 75%',
+        onEnter: () => [compA, compB].forEach((c) =>
+          gsap.to(c.scale, { x: 0.001, y: 0.001, z: 0.001, duration: 0.5, ease: 'power2.in' })),
+        onLeaveBack: () => [[compA, 0.4], [compB, 0.26]].forEach(([c, s]) =>
+          gsap.to(c.scale, { x: s, y: s, z: s, duration: 0.8, ease: 'back.out(2)' })),
+      });
+    }
+
+    /* ── INTRO GATE ──────────────────────────────────────────────
+       Lock the page scroll while the pear dramatically drops in and
+       settles into its hero spot, then release. A hard failsafe always
+       releases (so a hiccup can never trap the user), and desktop-only
+       (mobile/reduced-motion/no-GSAP get no lock and no intro). */
+    let introDone = false, failsafe;
+    const blockWheel = (e) => e.preventDefault();
+    const blockKeys  = (e) => { if ([32,33,34,35,36,38,40].includes(e.keyCode)) e.preventDefault(); };
+    function releaseIntro() {
+      if (introDone) return;
+      introDone = true;
+      clearTimeout(failsafe);
+      /* SNAP to the final resting state so the scene is guaranteed visible even
+         if the intro tween was interrupted (kill any in-flight intro tweens
+         first, then plant everything where it belongs). */
+      if (window.gsap) gsap.killTweensOf([pear.position, pear.scale, compA.scale, compB.scale]);
+      pear.position.set(state.x, state.y, 0);
+      pear.scale.setScalar(state.s);
+      compA.scale.setScalar(0.36);
+      compB.scale.setScalar(0.24);
+      document.documentElement.classList.remove('intro-lock');
+      removeEventListener('wheel', blockWheel, { passive: false });
+      removeEventListener('touchmove', blockWheel, { passive: false });
+      removeEventListener('keydown', blockKeys);
+      if (window.ScrollTrigger) ScrollTrigger.refresh();
+    }
+    if (window.gsap && innerWidth >= 1024) {
+      scrollTo(0, 0);
+      document.documentElement.classList.add('intro-lock');
+      addEventListener('wheel', blockWheel, { passive: false });
+      addEventListener('touchmove', blockWheel, { passive: false });
+      addEventListener('keydown', blockKeys);
+      failsafe = setTimeout(releaseIntro, 3000);          // guaranteed unlock
+      pear.position.set(-2.9, 5.4, 0.4);                  // start high, above the fold
+      pear.scale.setScalar(0.02);
+      gsap.timeline({ onComplete: releaseIntro })
+        .to(pear.scale,    { x: 0.72, y: 0.72, z: 0.72, duration: 1.5, ease: 'back.out(1.5)' }, 0)
+        .to(pear.position, { x: -2.9, y: 0.4, z: 0, duration: 1.7, ease: 'power3.out' }, 0)
+        .from([compA.scale, compB.scale], { x: 0, y: 0, z: 0, duration: 1, ease: 'back.out(2)' }, 0.45);
+    } else {
+      introDone = true;                                   // no lock path
+    }
+
+    /* ── sizing / interaction / loop ── */
+    function resize() {
+      renderer.setSize(innerWidth, innerHeight, false);
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+    }
+    addEventListener('resize', resize);
+    resize();
+
+    let mx = 0, my = 0;
+    addEventListener('mousemove', (e) => {
+      mx = e.clientX / innerWidth - 0.5;
+      my = e.clientY / innerHeight - 0.5;
+    }, { passive: true });
+
+    const clock = new THREE.Clock();
+    function frame() {
+      requestAnimationFrame(frame);
+      if (document.hidden || innerWidth < 1024 || document.body.classList.contains('docs-active')) return;
+      const t = clock.getElapsedTime();
+
+      /* hero pear: slow lerp (0.02) toward the active waypoint = weighty,
+         unhurried motion. Gentle float, slow drift-spin, feather-light mouse
+         lean — so it reads as a real fruit hanging in space, not a fast toy.
+         Skipped during the intro, when GSAP owns the pear's drop-in. */
+      if (introDone) {
+        /* State is already scroll-scrubbed (weighty); this lerp is just a light
+           low-pass so micro-steps stay buttery — fast enough (0.12) that the pear
+           never visibly trails the scroll, so it can't look "stuck" on a fast fling. */
+        pear.position.x += (state.x + mx * 0.3 - pear.position.x) * 0.12;
+        pear.position.y += (state.y + Math.sin(t * 0.55) * 0.16 - pear.position.y) * 0.12;
+        const s = pear.scale.x + (state.s - pear.scale.x) * 0.12;
+        pear.scale.setScalar(s);
+        pear.rotation.x += (my * 0.18 - pear.rotation.x) * 0.05;
+      }
+      pear.rotation.y = t * state.spin + scrollY * 0.00035;
+      pear.rotation.z = Math.sin(t * 0.3) * 0.05;
+
+      /* companions: slow idle bob in the hero */
+      compA.rotation.y = -t * 0.12;  compA.position.y = -1.5 + Math.sin(t * 0.8 + 2) * 0.14;
+      compB.rotation.y =  t * 0.14;  compB.position.y =  2.5 + Math.sin(t * 0.7 + 4) * 0.12;
+
+      renderer.render(scene, camera);
+    }
+    frame();
+  }
+} catch (e) {
+  /* No WebGL / CDN blocked → the page simply renders without the 3D layer. */
+  console.warn('[PEAR] 3D scene skipped:', e?.message || e);
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,159 @@
+{
+  "generatedAt": "2026-07-24T12:57:02.746Z",
+  "model": "gemini-flash-latest",
+  "itemCount": 19,
+  "items": [
+    {
+      "itemId": "1",
+      "imageUrl": "https://live.staticflickr.com/8726/17084787712_8905988312_b.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.95,
+      "garmentType": "dress",
+      "notes": "The scooped neckline indicates the front view of the black camisole dress."
+    },
+    {
+      "itemId": "2",
+      "imageUrl": "https://live.staticflickr.com/8726/17084787712_8905988312_b.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.95,
+      "garmentType": "dress",
+      "notes": "The scooped neckline indicates the front view of the black camisole dress. (reused — same image already classified for item 1)"
+    },
+    {
+      "itemId": "3",
+      "imageUrl": "https://burst.shopifycdn.com/photos/red-t-shirt.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.98,
+      "garmentType": "t-shirt",
+      "notes": "The front of the red t-shirt is facing the camera, showing the lower front collar outline."
+    },
+    {
+      "itemId": "4",
+      "imageUrl": "https://burst.shopifycdn.com/photos/cobalt-blue-t-shirt.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.98,
+      "garmentType": "t-shirt",
+      "notes": "The blue heather crewneck t-shirt is displayed facing front on a wooden hanger."
+    },
+    {
+      "itemId": "5",
+      "imageUrl": "https://burst.shopifycdn.com/photos/teal-t-shirt.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.98,
+      "garmentType": "t-shirt",
+      "notes": "The crew neck collar dip clearly indicates the front side of the t-shirt."
+    },
+    {
+      "itemId": "6",
+      "imageUrl": "https://www.universalcolours.com/cdn/shop/files/LongSleeveTee-CharcoalBlack-1.jpg?v=1732626199&width=1024",
+      "detectedView": "front",
+      "confidenceScore": 0.98,
+      "garmentType": "long-sleeve t-shirt",
+      "notes": "Front view shown with lower crew neckline and logo graphic near the hem."
+    },
+    {
+      "itemId": "6",
+      "imageUrl": "https://www.universalcolours.com/cdn/shop/files/LongSleeveTee-CharcoalBlack-3.jpg?v=1732626199&width=1024",
+      "detectedView": "back",
+      "confidenceScore": 0.98,
+      "garmentType": "long-sleeve t-shirt",
+      "notes": "The back of the garment is facing the camera."
+    },
+    {
+      "itemId": "6",
+      "imageUrl": "https://www.universalcolours.com/cdn/shop/files/LongSleeveTee-CharcoalBlack-4.jpg?v=1732626199&width=1024",
+      "detectedView": "front",
+      "confidenceScore": 0.85,
+      "garmentType": "long-sleeve t-shirt",
+      "notes": "Close-up detail shot showing a small logo on the front chest area."
+    },
+    {
+      "itemId": "7",
+      "imageUrl": "https://cdn.shopify.com/s/files/1/0831/9103/products/DK_LS_Henley_Dark_Purple-Final-Web.jpg?v=1665703111",
+      "detectedView": "front",
+      "confidenceScore": 0.99,
+      "garmentType": "henley shirt",
+      "notes": "The front of the long-sleeve henley shirt with its button placket is clearly visible."
+    },
+    {
+      "itemId": "8",
+      "imageUrl": "https://img.freepik.com/premium-photo/beige-long-sleeve-shirt-isolated-white-background_1166140-13287.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.99,
+      "garmentType": "shirt",
+      "notes": "The front placket with buttons, collar, and chest pocket face forward."
+    },
+    {
+      "itemId": "9",
+      "imageUrl": "https://cdn.suitsupply.com/image/upload/b_rgb:efefef,bo_500px_solid_rgb:efefef,c_pad,w_2600/b_rgb:efefef,c_pad,dpr_1,w_850,h_1176,f_auto,q_auto,fl_progressive/products/Trousers/default/B6905_28.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.98,
+      "garmentType": "trousers",
+      "notes": "The front waistband extension tab and fly seam are visible."
+    },
+    {
+      "itemId": "10",
+      "imageUrl": "https://cdn.suitsupply.com/image/upload/b_rgb:efefef,bo_500px_solid_rgb:efefef,c_pad,w_2600/b_rgb:efefef,c_pad,dpr_1,w_850,h_1176,f_auto,q_auto,fl_progressive/products/Trousers/default/B6906_28.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.98,
+      "garmentType": "trousers",
+      "notes": "The front closure and fly seam indicate the front view of the trousers."
+    },
+    {
+      "itemId": "11",
+      "imageUrl": "https://image.hm.com/assets/hm/54/71/5471b01a9ccf7562c74cf7d8f0102228465f30b5.jpg?imwidth=2160",
+      "detectedView": "front",
+      "confidenceScore": 0.99,
+      "garmentType": "trousers",
+      "notes": "The front of the trousers is clearly visible with the button closure, fly stitching, and side pockets."
+    },
+    {
+      "itemId": "12",
+      "imageUrl": "https://image.hm.com/assets/hm/72/56/7256f227cb82ac834363dfb140f245652797d841.jpg?imwidth=1536",
+      "detectedView": "front",
+      "confidenceScore": 0.99,
+      "garmentType": "pants",
+      "notes": "The front button, fly zipper stitching, and front scoop pockets are clearly visible."
+    },
+    {
+      "itemId": "13",
+      "imageUrl": "https://cdn.suitsupply.com/image/upload/b_rgb:efefef,bo_300px_solid_rgb:efefef,c_pad,w_2600/b_rgb:efefef,c_pad,dpr_1,w_768,h_922,f_auto,q_auto,fl_progressive/products/Trousers/default/B25209_28.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.98,
+      "garmentType": "trousers",
+      "notes": "The front waistband button, fly closure, and pleats indicate the front view."
+    },
+    {
+      "itemId": "14",
+      "imageUrl": "https://cdn.suitsupply.com/image/upload/b_rgb:efefef,bo_500px_solid_rgb:efefef,c_pad,w_2600/b_rgb:efefef,c_pad,dpr_1,w_850,h_1176,f_auto,q_auto,fl_progressive/products/Trousers/default/B25212_28.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.98,
+      "garmentType": "trousers",
+      "notes": "The front of the trousers is shown with a visible front fly seam."
+    },
+    {
+      "itemId": "15",
+      "imageUrl": "https://cdn.suitsupply.com/image/upload/b_rgb:efefef,bo_500px_solid_rgb:efefef,c_pad,w_2600/b_rgb:efefef,c_pad,dpr_1,w_850,h_1176,f_auto,q_auto,fl_progressive/products/Trousers/default/B9449_28.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.99,
+      "garmentType": "trousers",
+      "notes": "The front waistband, button closure, and fly seam are clearly visible."
+    },
+    {
+      "itemId": "16",
+      "imageUrl": "https://image.hm.com/assets/hm/31/ab/31ab5b52cc238aaad4d95fa3a79d2af741bf7192.jpg?imwidth=1536",
+      "detectedView": "front",
+      "confidenceScore": 0.99,
+      "garmentType": "cargo pants",
+      "notes": "The button closure and fly at the waistband clearly indicate the front view of the pants."
+    },
+    {
+      "itemId": "99",
+      "imageUrl": "https://burst.shopifycdn.com/photos/cobalt-blue-t-shirt.jpg",
+      "detectedView": "front",
+      "confidenceScore": 0.98,
+      "garmentType": "t-shirt",
+      "notes": "The blue heather crewneck t-shirt is displayed facing front on a wooden hanger. (reused — same image already classified for item 4)"
+    }
+  ]
+}
