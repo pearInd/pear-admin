@@ -1101,6 +1101,55 @@ app.get("/api/admin/whoami", authLimiter, requireAdminAuth, (req, res) => {
   res.json({ ok: true, email: req.adminEmail });
 });
 
+/* GET /api/admin/diagnostics — what THIS running process actually sees.
+
+   Exists because "the variable is set in the dashboard" and "the running
+   function can read it" are different claims, and the gap between them (added
+   after the last deploy, added to a different Vercel project, a typo in the
+   name, wrong environment scope) is invisible from the outside: every one of
+   them produces the same empty dashboard.
+
+   Reports presence, not values. Project refs come from the URL, which is not
+   secret and already ships in the browser bundle. Key roles come from the
+   public claims of the API key. No key material is ever returned, and the whole
+   endpoint sits behind requireAdminAuth. */
+app.get("/api/admin/diagnostics", authLimiter, requireAdminAuth, (_req, res) => {
+  const refFromUrl = (u) => (String(u || "").match(/^https:\/\/([^.]+)\./) || [])[1] || null;
+  const claim = (k, field) => {
+    try {
+      return JSON.parse(Buffer.from(
+        String(k).split(".")[1].replace(/-/g, "+").replace(/_/g, "/"), "base64"
+      ).toString("utf8"))[field] || null;
+    } catch { return null; }
+  };
+  const describe = (urlVar, keyVar, client) => {
+    const url = process.env[urlVar];
+    const key = process.env[keyVar];
+    return {
+      [urlVar]: { present: Boolean(url), projectRef: refFromUrl(url) },
+      [keyVar]: { present: Boolean(key), role: key ? claim(key, "role") : null,
+                  projectRef: key ? claim(key, "ref") : null },
+      clientInitialized: Boolean(client),
+    };
+  };
+
+  res.set("Cache-Control", "no-store");
+  res.json({
+    ok: true,
+    authProject: describe("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", authSupabase),
+    appProject:  describe("APP_SUPABASE_URL", "APP_SUPABASE_SERVICE_ROLE_KEY", appSupabase),
+    adminEmailsCount: ADMIN_EMAILS.length,
+    resendConfigured: Boolean(process.env.RESEND_API_KEY),
+    // Any APP_*/SUPABASE_* names the process can see. A near-miss here (a typo,
+    // or SUPABASE_ vs APP_SUPABASE_) is the usual explanation for a variable
+    // that is "definitely set" yet reads as missing.
+    supabaseEnvNamesVisible: Object.keys(process.env)
+      .filter((k) => /SUPABASE/i.test(k)).sort(),
+    vercelEnv: process.env.VERCEL_ENV || null,
+    deploymentUrl: process.env.VERCEL_URL || null,
+  });
+});
+
 /* ═══════════════════════════════════════════════════════════════════════════
    ADMIN PASSWORD RESET — server-owned 6-digit OTP, delivered via Resend.
 
