@@ -1,0 +1,307 @@
+/* ============================================================================
+   PEAR — Luxury micro-interaction layer  (iOS / macOS-grade polish)
+   ----------------------------------------------------------------------------
+   ADDITIVE ONLY. Mirrors the contract of mobile-ux.js: this file never touches
+   app.js state, the Decart VTON / billing flow, or any existing id/class/state
+   hook. It only *adds* theatre on top of the existing DOM.
+
+   Features
+     1. Add-to-Cart micro-interaction — press → spinner (800ms) → a mini garment
+        clone flies along a 3D Bézier arc into the header cart, which jiggles;
+        the button morphs to a checkmark and back.
+     2. Bitten-Pear screen transition — a vector pear masks the view, a chunk
+        snaps out of its side, then it bursts open to reveal Screen 2.
+     3. Ambient side rails — vertical editorial tracks that parallax to scroll
+        and pointer, filling desktop/tablet margins without clutter.
+     4. Universal polish — magnetic button content, floating-label fields,
+        a top-center spring "cart" toast, and a metallic skeleton utility.
+
+   Palette: logo-matched ivory canvas + crisp luxury black, with PEAR GREEN
+   (#8DB600) as the sole accent (buttons, active states, the Add-to-Cart family).
+   Honours prefers-reduced-motion and degrades to instant, correct behaviour.
+   ============================================================================ */
+(function () {
+  "use strict";
+
+  const $    = (id) => document.getElementById(id);
+  const POWER = "cubic-bezier(0.25, 1, 0.5, 1)";   // Apple signature power-ease
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const fine   = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+
+  function ready(fn) {
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fn);
+    else fn();
+  }
+  ready(init);
+
+  function init() {
+    initCart();
+    initLiquidMesh();
+    initFloatingLabels();
+    initSkeletons();
+    if (fine && !reduce) initMagnetic();
+  }
+  /* NOTE: the Bitten-Pear transition is now orchestrated entirely by app.js
+     (goToFitting → playPearTransition) so the SAME sequenced timeline serves
+     both the Continue-button click and the Enter-key path, and the screen swap
+     lands at the mask's mid-point. The old click-only trigger that used to live
+     here was removed to avoid a double-fire. The overlay markup + keyframes are
+     unchanged and still defined in index.html / style.css. */
+
+  /* ──────────────────────────────────────────────────────────────────────────
+     1 · ADD TO CART  — spinner → 3D-arc fly → cart jiggle → checkmark → reset
+     ────────────────────────────────────────────────────────────────────────── */
+  function initCart() {
+    const btn   = $("addToCartBtn");
+    const cart  = $("cartBtn");
+    const badge = $("cartCount");
+    if (!btn || !cart) return;
+
+    let count = parseInt(localStorage.getItem("pear_cart_count") || "0", 10) || 0;
+    renderBadge();
+
+    function renderBadge() {
+      if (!badge) return;
+      badge.textContent = String(count);
+      badge.classList.toggle("is-empty", count === 0);
+    }
+
+    function inIframe() {
+      try { return window.self !== window.top; } catch (_) { return true; }
+    }
+
+    function land() {
+      count += 1;
+      localStorage.setItem("pear_cart_count", String(count));
+      renderBadge();
+      bounceCart();
+
+      const garment = (window.pearGetActiveGarment && window.pearGetActiveGarment()) || {};
+
+      if (inIframe()) {
+        // Embedded in a store (e.g. fox.co.il) — hand the garment off to the host
+        // page's own cart. pear-widget.js listens for this and calls /cart/add.js.
+        window.parent.postMessage({
+          type: "PEAR_ADD_TO_CART",
+          garmentUrl: garment.url || "",
+          garmentName: garment.name || "",
+          variantId: garment.variantId || "",
+        }, "*");
+        springToast("נוסף לסל · Added to cart");
+      } else {
+        // Standalone (PEAR demo site, no host store to hand off to).
+        springToast("הפריט נוסף לסל! (דמו)");
+      }
+    }
+
+    let busy = false;
+    btn.addEventListener("click", () => {
+      if (busy) return;
+      busy = true;
+      btn.setAttribute("aria-busy", "true");
+
+      if (reduce) {                         // no theatre — just confirm
+        land();
+        btn.classList.add("is-done");
+        setTimeout(() => { btn.classList.remove("is-done"); btn.removeAttribute("aria-busy"); busy = false; }, 1100);
+        return;
+      }
+
+      // Press → loading spinner for 800ms (button stays scaled-in via :active style).
+      btn.classList.add("is-loading");
+      setTimeout(() => {
+        btn.classList.remove("is-loading");
+        btn.classList.add("is-done");        // elegant checkmark morph
+        flyClone(land);                      // the mini garment takes flight
+        // Smoothly morph back to the original label.
+        setTimeout(() => { btn.classList.remove("is-done"); btn.removeAttribute("aria-busy"); busy = false; }, 1500);
+      }, 800);
+    });
+
+    function bounceCart() {
+      cart.classList.remove("is-bounce");
+      void cart.offsetWidth;                 // restart the keyframe
+      cart.classList.add("is-bounce");
+      setTimeout(() => cart.classList.remove("is-bounce"), 720);
+    }
+  }
+
+  /* Build a mini clone of the garment (or a clean pear-green dot) and animate it
+     from the canvas centre into the cart icon along a lifted Bézier arc. */
+  function flyClone(onLand) {
+    const card = $("cameraCard");
+    const cart = $("cartBtn");
+    if (!card || !cart) { onLand && onLand(); return; }
+
+    const from = card.getBoundingClientRect();
+    const to   = cart.getBoundingClientRect();
+    const sx = from.left + from.width / 2,  sy = from.top + from.height / 2;
+    const ex = to.left   + to.width   / 2,  ey = to.top  + to.height  / 2;
+
+    // A tiny pear-green particle dot (iOS dynamic-island style) flows into the bag.
+    const clone = document.createElement("div");
+    clone.className = "cart-fly cart-fly--dot";
+    clone.style.left = sx + "px";
+    clone.style.top  = sy + "px";
+    document.body.appendChild(clone);
+
+    const dx = ex - sx, dy = ey - sy;
+    const arc = Math.min(140, Math.abs(dx) * 0.35 + 70);   // how high the arc lifts
+    const anim = clone.animate(
+      [
+        { transform: "translate(-50%,-50%) scale(1) rotate(0deg)", opacity: 1, offset: 0 },
+        { transform: `translate(calc(-50% + ${dx * 0.5}px), calc(-50% + ${dy * 0.5 - arc}px)) scale(.62) rotate(10deg)`, opacity: 1, offset: 0.55 },
+        { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(.14) rotate(-6deg)`, opacity: 0.35, offset: 1 },
+      ],
+      { duration: 850, easing: POWER, fill: "forwards" }
+    );
+    anim.onfinish = () => { clone.remove(); onLand && onLand(); };
+    // Safety net if onfinish never fires (tab backgrounded, etc.)
+    setTimeout(() => { if (clone.isConnected) { clone.remove(); onLand && onLand(); } }, 1200);
+  }
+
+  /* Top-center spring toast — reserved for cart confirmations so the existing
+     bottom measurement toasts (app.js → toast()) are left exactly as they are. */
+  let cartToastEl = null, cartToastTimer = 0;
+  function springToast(msg) {
+    if (!cartToastEl) {
+      cartToastEl = document.createElement("div");
+      cartToastEl.className = "lux-cart-toast";
+      cartToastEl.setAttribute("role", "status");
+      cartToastEl.innerHTML =
+        '<span class="lux-cart-toast__icon" aria-hidden="true">✓</span><span class="lux-cart-toast__msg"></span>';
+      document.body.appendChild(cartToastEl);
+    }
+    cartToastEl.querySelector(".lux-cart-toast__msg").textContent = msg;
+    cartToastEl.classList.remove("show");
+    void cartToastEl.offsetWidth;
+    cartToastEl.classList.add("show");
+    clearTimeout(cartToastTimer);
+    cartToastTimer = setTimeout(() => cartToastEl.classList.remove("show"), 2600);
+  }
+
+  /* ──────────────────────────────────────────────────────────────────────────
+     4a · FLOATING LABELS + MICRO-INERTIA — the label glides up + tints when
+     focused/filled, and (while focused, desktop pointers) drifts magnetically
+     toward the cursor via --lblx/--lbly, giving the field tangible weight.
+     Driven purely by classes/vars so app.js's input listeners stay untouched.
+     ────────────────────────────────────────────────────────────────────────── */
+  function initFloatingLabels() {
+    document.querySelectorAll("#sizeForm .form-group").forEach((g) => {
+      const input = g.querySelector("input");
+      const label = g.querySelector("label");
+      if (!input) return;
+      g.classList.add("lux-field");
+      const sync = () => g.classList.toggle("is-filled", !!input.value);
+      input.addEventListener("focus", () => g.classList.add("is-focus"));
+      input.addEventListener("blur",  () => { g.classList.remove("is-focus"); sync(); });
+      input.addEventListener("input", sync);
+      sync();
+
+      // magnetic micro-inertia — only while the field is focused, on fine pointers
+      if (label && fine && !reduce) {
+        let raf = 0;
+        const reset = () => { label.style.setProperty("--lblx", "0px"); label.style.setProperty("--lbly", "0px"); };
+        g.addEventListener("pointermove", (e) => {
+          if (e.pointerType === "touch" || !g.classList.contains("is-focus")) return;
+          cancelAnimationFrame(raf);
+          raf = requestAnimationFrame(() => {
+            const r = g.getBoundingClientRect();
+            const px = (e.clientX - (r.left + r.width  / 2)) / r.width;
+            const py = (e.clientY - (r.top  + r.height / 2)) / r.height;
+            label.style.setProperty("--lblx", (px * 7).toFixed(1) + "px");
+            label.style.setProperty("--lbly", (py * 4).toFixed(1) + "px");
+          });
+        });
+        g.addEventListener("pointerleave", () => { cancelAnimationFrame(raf); reset(); });
+        input.addEventListener("blur", () => { cancelAnimationFrame(raf); reset(); });
+      }
+    });
+  }
+
+  /* ──────────────────────────────────────────────────────────────────────────
+     LIQUID-GLASS DYNAMIC BACKGROUND — inertial mesh parallax (transform only).
+     The mesh eases toward a pointer/tilt-derived target each frame; the rAF loop
+     runs ONLY while settling, so there is zero idle cost.
+     ────────────────────────────────────────────────────────────────────────── */
+  function initLiquidMesh() {
+    const mesh = document.querySelector(".liquid-mesh");
+    if (!mesh || reduce) return;
+
+    const AMP = 26;                       // max drift in px (microscopic)
+    let tx = 0, ty = 0, cx = 0, cy = 0, running = false;
+
+    const loop = () => {
+      cx += (tx - cx) * 0.06;             // inertia toward the target
+      cy += (ty - cy) * 0.06;
+      mesh.style.transform = `translate3d(${cx.toFixed(2)}px, ${cy.toFixed(2)}px, 0)`;
+      if (Math.abs(tx - cx) > 0.08 || Math.abs(ty - cy) > 0.08) {
+        requestAnimationFrame(loop);
+      } else { running = false; }
+    };
+    const kick = () => { if (!running) { running = true; requestAnimationFrame(loop); } };
+
+    if (fine) {
+      window.addEventListener("mousemove", (e) => {
+        tx = (e.clientX / window.innerWidth  - 0.5) * AMP;
+        ty = (e.clientY / window.innerHeight - 0.5) * AMP;
+        kick();
+      }, { passive: true });
+    } else if (window.DeviceOrientationEvent) {
+      // mobile: subtle tilt parallax (no permission prompt — inert if denied)
+      window.addEventListener("deviceorientation", (ev) => {
+        const clamp = (v) => Math.max(-1, Math.min(1, v));
+        tx = clamp((ev.gamma || 0) / 30) * AMP;
+        ty = clamp((ev.beta  || 0) / 30) * AMP;
+        kick();
+      }, { passive: true });
+    }
+  }
+
+  /* 4b · METALLIC SKELETON — shimmer garment thumbnails until their image loads. */
+  function initSkeletons() {
+    const media = $("activeGarmentMedia");
+    if (!media || !("MutationObserver" in window)) return;
+    const tag = () => {
+      media.querySelectorAll("img:not([data-lux])").forEach((img) => {
+        img.dataset.lux = "1";
+        if (img.complete && img.naturalWidth) return;
+        const host = img.closest("span") || media;
+        host.classList.add("lux-skeleton");
+        const clear = () => host.classList.remove("lux-skeleton");
+        img.addEventListener("load",  clear, { once: true });
+        img.addEventListener("error", clear, { once: true });
+      });
+    };
+    new MutationObserver(tag).observe(media, { childList: true, subtree: true });
+    tag();
+  }
+
+  /* 4c · MAGNETIC BUTTONS — the inner content drifts toward the cursor.
+     We move the *content*, never the button box, so the existing transform-based
+     hover / press / pulse states keep working untouched. Desktop pointers only. */
+  function initMagnetic() {
+    const targets = document.querySelectorAll(".btn-primary, .btn-capture, #addToCartBtn, .btn-watch");
+    targets.forEach((el) => {
+      const kids = Array.from(el.children);
+      if (!kids.length) return;
+      let raf = 0;
+      el.classList.add("lux-magnetic");
+      el.addEventListener("pointermove", (e) => {
+        if (e.pointerType === "touch") return;
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(() => {
+          const r = el.getBoundingClientRect();
+          const px = (e.clientX - (r.left + r.width  / 2)) / r.width;
+          const py = (e.clientY - (r.top  + r.height / 2)) / r.height;
+          const tx = (px * 12).toFixed(1), ty = (py * 8).toFixed(1);
+          kids.forEach((k) => { k.style.transform = `translate(${tx}px, ${ty}px)`; });
+        });
+      });
+      el.addEventListener("pointerleave", () => {
+        cancelAnimationFrame(raf);
+        kids.forEach((k) => { k.style.transform = ""; });
+      });
+    });
+  }
+})();

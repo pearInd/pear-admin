@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "server.js",
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": [
+          "*.html",
+          "*.css",
+          "*.js",
+          "*.png",
+          "*.svg",
+          "admin/**",
+          "fitting-room/**",
+          "widget/**",
+          "pear-demo/**",
+          "pear interface/**",
+          "price clac/**",
+          "lib/**",
+          "docs/**"
+        ]
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/server.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/server.js"
+    }
+  ]
+}

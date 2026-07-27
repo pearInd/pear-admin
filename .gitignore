@@ -5,6 +5,9 @@ node_modules/
 .env
 .env.local
 
+# scratch dirs from image/gate checks
+.tmp_*/
+
 # logs / os
 npm-debug.log*
 *.log

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- PEAR — official brand mark, vectorised for crisp, deployment-safe rendering
+     (pear silhouette · serif "P" · clothing hanger · stem & leaf). Uses
+     currentColor so it inherits the surrounding ink; defaults to brand black. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 152" role="img" aria-label="PEAR"
+     fill="none" stroke="#0a0a0b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+  <!-- pear silhouette -->
+  <path d="M61 30 C67 30 69 39 65 46 C81 54 91 74 91 101 C91 128 77 143 59 143 C41 143 27 128 27 101 C27 74 38 54 53 46 C49 39 51 30 61 30 Z"/>
+  <!-- stem -->
+  <path d="M61 31 C59 22 62 15 70 12"/>
+  <!-- leaf -->
+  <path d="M70 14 C81 8 94 12 95 22 C86 28 74 24 70 14 Z" fill="#0a0a0b" stroke="none"/>
+  <!-- serif "P" -->
+  <path d="M70 58 L70 128" stroke-width="6"/>
+  <path d="M70 60 H86 C95 60 101 67 101 77 C101 87 95 93 86 93 H70" stroke-width="5"/>
+  <path d="M61 58 H79" stroke-width="5"/>
+  <path d="M61 128 H79" stroke-width="5"/>
+  <!-- coat hanger across the lower belly -->
+  <path d="M59 110 v-5 a4 4 0 1 1 5 4" stroke-width="2.6"/>
+  <path d="M40 122 L59 108 L84 122" stroke-width="2.6"/>
+</svg>

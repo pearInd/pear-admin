@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#efe8d8" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0a0a0b" media="(prefers-color-scheme: dark)">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="PEAR">
+    <title>PEAR — חדר הלבשה וירטואלי</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Urbanist:wght@400;500;600;700;800;900&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ░░ Returning-device pre-paint gate (Feature 5 fix) — synchronous, blocking,
+     runs before the browser paints ANY of #screen-calculator below. If this
+     browser has a remembered pear_device_id, force-hide the identity gate /
+     measurement form (see the html.pear-returning-check rule in style.css)
+     so there is zero flash of those screens while app.js's setupIdentityGate()
+     confirms the device server-side. app.js removes the class the moment it
+     knows the outcome — either routing straight to the camera (200 + fresh
+     profile) or revealing the gate itself (404 / no device / infra error). ░░ -->
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("pear_device_id")) {
+      document.documentElement.classList.add("pear-returning-check");
+    }
+  } catch (e) {}
+})();
+</script>
+
+<!-- ░░ Liquid-glass dynamic background — a soft mesh of blurred light that drifts
+     microscopically with the pointer / device tilt (lux-interactions.js applies an
+     inertial translate3d). Fixed, behind all content, pointer-events:none. ░░ -->
+<div class="liquid-mesh" aria-hidden="true"></div>
+
+<!-- ░░ Bitten-Pear screen transition overlay (Screen 1 → Screen 2) ░░ -->
+<!-- ░░ "Liquid Brand Aperture" transition (Screen 1 → Screen 2) ░░
+     Layers, painted bottom→top: glass backdrop · brand logo · pear-green flood.
+     The flood is a single GPU layer (viewport-sized ellipse) that scales up to
+     mask the screen, then scales out + fades like a camera aperture. NO clipping
+     paths, NO secondary "bite" shape — pure transform + opacity. -->
+<div class="pear-transition" id="pearTransition" aria-hidden="true" hidden>
+  <div class="pear-transition__bg"></div>
+  <!-- Authentic PEAR logo (official raster mark). Scales/fades via the same
+       .pear-transition__shape animation; the pear-green flood below is untouched. -->
+  <img class="pear-transition__shape" src="/pear-logo.png" alt="" role="presentation" decoding="async">
+
+  <!-- the pear-green liquid flood / aperture (single GPU layer) -->
+  <div class="pear-transition__flood" aria-hidden="true"></div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     SCREEN 1 — Size / body-measurement calculator (REQUIRED FIRST STEP)
+     ════════════════════════════════════════════════════════════════════ -->
+<div id="screen-calculator" class="screen active">
+  <div class="calc-shell">
+
+    <!-- ░░ Editorial lookbook panel — premium B&W split-screen on desktop, an elegant
+         banner on mobile. Purely decorative: the photo is forced monochrome via CSS,
+         and if the remote image ever fails it removes itself, leaving a styled black
+         panel so the layout never reads as broken. ░░ -->
+    <aside class="calc-editorial">
+      <img class="calc-editorial__img"
+           src="https://images.unsplash.com/photo-1539109136881-3be0616acf4b?w=1100&q=80&sat=-100&auto=format&fit=crop"
+           alt="" aria-hidden="true" loading="eager" onerror="this.remove()">
+      <div class="calc-editorial__scrim"></div>
+      <div class="calc-editorial__content">
+        <span class="calc-editorial__kicker">PEAR · Atelier</span>
+        <h1 class="calc-editorial__headline">המידה שלך,<br>בדיוק מושלם</h1>
+        <p class="calc-editorial__lead">חדר הלבשה וירטואלי בזמן אמת — הלוק נמדד על הגוף שלך, מתוך נתונים ולא ניחושים.</p>
+        <ul class="calc-editorial__list">
+          <li>התאמת מידה אלגוריתמית מדויקת</li>
+          <li>מדידה חיה של הבגד על הגוף</li>
+          <li>שמירה והורדה של הלוק</li>
+        </ul>
+        <span class="calc-editorial__meta">Lookbook № 01 — Monochrome Capsule</span>
+      </div>
+    </aside>
+
+    <!-- ░░ Calculator column ░░ -->
+    <div class="calc-main">
+    <div class="step-progress">
+        <div class="step-progress-label">
+            <span>שלב 1 מתוך 2 · Size</span>
+            <span id="progressPercent">0%</span>
+        </div>
+        <div class="step-progress-track">
+            <div class="step-progress-fill" id="progressFill"></div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="focus-calc-hint" id="focusCalcHint" hidden></div>
+        <span class="kicker">PEAR · Personal Fit Engine</span>
+        <h2>התאמת מידה אישית</h2>
+        <p class="subtitle">הזן נתונים – האלגוריתם יחשב את המידה המדויקת עבורך</p>
+
+        <!-- ░░ Identity gate — the TRUE default view (app.js). The DOM must never
+             paint the measurement form before JS has decided where to route the
+             visitor, so this form ships VISIBLE by default and #sizeForm ships
+             hidden by default (both hidden-attr AND inline display:none — #sizeForm
+             has `display:grid` in CSS which outranks [hidden] alone). JS only ever
+             moves you AWAY from this state (showSizeForm / routeAfterIdentity),
+             never the reverse, so there is no flash of the wrong step on load. ░░ -->
+        <form id="identityForm" autocomplete="off">
+            <div class="form-group">
+                <label for="userName"><span class="required">*</span>שם מלא:</label>
+                <input type="text" id="userName" autocomplete="name" placeholder="לדוגמה: דנה כהן">
+            </div>
+            <div class="form-group">
+                <label for="userEmail"><span class="required">*</span>אימייל:</label>
+                <input type="email" id="userEmail" autocomplete="email" inputmode="email" placeholder="לדוגמה: dana@example.com">
+            </div>
+            <!-- Plain container: must NOT use .result-actions (that class stays
+                 collapsed/invisible until the size-calc adds .is-ready, which would
+                 permanently hide this Continue button). -->
+            <div id="identityActions" style="margin-top:14px">
+                <button id="btn-identity-continue" type="button" class="btn-primary">המשך →</button>
+                <p id="identityError" class="login-error" role="alert" hidden style="margin-top:10px"></p>
+            </div>
+        </form>
+
+        <form id="sizeForm" autocomplete="off" hidden style="display:none">
+            <!-- Monthly measurements-refresh nudge — shown only when a known,
+                 30+ day-stale profile forces this form open (see routeUser/
+                 showSizeForm in app.js). Hidden the rest of the time. -->
+            <p id="measurementsRefreshNotice" class="measurements-refresh-notice" hidden>עדכן את המידות שלך - עבר חודש מהפעם האחרונה</p>
+            <!-- ░░ Mandatory inputs — always visible (idle state) ░░ -->
+            <div class="form-group">
+                <label for="height"><span class="required">*</span>גובה (בס"מ):</label>
+                <input type="number" id="height" min="100" max="300" placeholder="לדוגמה: 175">
+            </div>
+            <div class="form-group">
+                <label for="weight"><span class="required">*</span>משקל (בק"ג):</label>
+                <input type="number" id="weight" min="30" max="250" placeholder="לדוגמה: 68">
+            </div>
+
+            <!-- ░░ Result + Continue — appear directly below Weight once both
+                 mandatory fields are valid. .is-ready (set in app.js) drives the
+                 staggered liquid reveal. ░░ -->
+            <div class="result-actions" id="resultActions">
+                <div class="result-box" id="resultBox">
+                    <div id="resultLabel">המידה המומלצת עבורך:</div>
+                    <div class="size-display" id="sizeResult">-</div>
+                </div>
+
+                <button id="btn-next-screen" type="button" class="btn-primary" disabled>המשך לחדר המדידה הוירטואלי →</button>
+            </div>
+
+            <!-- ░░ Optional "Fine-tune your fit" tray — pushed to the bottom,
+                 revealed below the result as a secondary, optional action.
+                 Stays hidden until BOTH mandatory fields are valid (Task 6). ░░ -->
+            <div class="optional-fields optional-fields-container" id="optionalFields">
+                <div class="section-divider"><span>כוונון עדין · Fine-tune your fit</span></div>
+
+                <div class="form-group">
+                    <label for="chest">היקף חזה (בס"מ) <span class="optional">(אופציונלי)</span>:</label>
+                    <input type="number" id="chest" min="50" max="150" placeholder="לדוגמה: 94">
+                </div>
+                <div class="form-group">
+                    <label for="waist">היקף מותניים (בס"מ) <span class="optional">(אופציונלי)</span>:</label>
+                    <input type="number" id="waist" min="40" max="150" placeholder="לדוגמה: 80">
+                </div>
+                <div class="form-group">
+                    <label for="legs">אורך רגליים (בס"מ) <span class="optional">(אופציונלי)</span>:</label>
+                    <input type="number" id="legs" min="50" max="120" placeholder="לדוגמה: 102">
+                </div>
+            </div>
+
+            <!-- ░░ Permanent "Update Measurements" CTA — always available on the size
+                 screen (the user's dashboard). Saves a fresh, timestamped snapshot
+                 on demand, independent of proceeding to the fitting room. ░░ -->
+            <button id="btn-update-measurements" type="button" class="btn-update-measure">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+                     stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 20h9"/>
+                    <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+                </svg>
+                <span>עדכון מדידות</span>
+            </button>
+        </form>
+    </div>
+    </div><!-- /.calc-main -->
+  </div><!-- /.calc-shell -->
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     SCREEN 2 — Isolated Try-On Room (Lucy VTON realtime snapshot flow)
+     ════════════════════════════════════════════════════════════════════ -->
+<div id="screen-fitting" class="screen">
+
+    <!-- ░░ Profile button (Feature 3) — top-right corner, always visible while in
+         the fitting room, not just on the identity gate. Hidden via [hidden] until
+         a user is known (updateProfileButton() in app.js). Fixed position so it
+         stays put regardless of scroll/camera state; z-index sits above the camera
+         stage but below any modal/overlay. ░░ -->
+    <button class="profile-btn" id="profileBtn" type="button" hidden
+            aria-label="פרופיל משתמש · User profile" aria-haspopup="true">
+        <span class="profile-btn__initial" id="profileInitial">?</span>
+    </button>
+    <div class="profile-dropdown" id="profileDropdown" role="menu" hidden>
+        <div class="profile-dropdown__identity">
+            <span class="profile-dropdown__avatar" id="profileAvatar">?</span>
+            <strong class="profile-dropdown__name" id="profileName"></strong>
+            <span class="profile-dropdown__email" id="profileEmail"></span>
+        </div>
+        <div class="profile-dropdown__divider"></div>
+        <div class="profile-dropdown__measurements">
+            <div class="profile-dropdown__row">
+                <span class="profile-dropdown__label">גובה:</span>
+                <span class="profile-dropdown__value" id="profileHeight"></span>
+            </div>
+            <div class="profile-dropdown__row">
+                <span class="profile-dropdown__label">משקל:</span>
+                <span class="profile-dropdown__value" id="profileWeight"></span>
+            </div>
+            <div class="profile-dropdown__row">
+                <span class="profile-dropdown__label">מידה:</span>
+                <span class="profile-dropdown__value" id="profileSize"></span>
+            </div>
+        </div>
+        <div class="profile-dropdown__divider"></div>
+        <button class="profile-dropdown__logout" id="profileLogoutBtn" type="button">התנתקות</button>
+    </div>
+
+    <!-- Pear-green product-isolation status bar (focus mode only) -->
+    <div class="focus-bar" id="focusBar" hidden>
+        <span class="focus-bar__dot"></span>
+        <span class="focus-bar__text">מדידת פריט ממוקדת: <strong id="focusItemName">—</strong></span>
+        <span class="focus-bar__badge" id="focusSizeBadge"></span>
+    </div>
+
+    <div class="app-header">
+        <!-- Nav zone (start / right in RTL): storefront + edit-measurements. -->
+        <div class="app-header__nav">
+        <!-- Back to Store — breaks out of any iframe (target="_top") and returns
+             to the storefront homepage. -->
+        <a class="back-to-store" href="/" target="_top" aria-label="חזרה לחנות · Back to store">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                 stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 9.5 5.4 4h13.2L20 9.5"/>
+                <path d="M4.5 9.5h15V19a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V9.5Z"/>
+                <path d="M10 20v-5h4v5"/>
+            </svg>
+            <span>חזרה לחנות</span>
+        </a>
+        <!-- Edit Measurements — always visible in the fitting room so a returning
+             visitor whose profile was applied automatically (see routeUser in
+             app.js) can jump back and correct it without hunting for it. -->
+        <button class="btn-edit-measurements" id="btn-edit-measurements" type="button"
+                aria-label="עריכת מידות · Edit measurements">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                 stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 20h9"/>
+                <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+            </svg>
+            <span>עריכת מידות</span>
+        </button>
+        </div><!-- /.app-header__nav -->
+
+        <!-- Brand lockup (centre): logo + PEAR wordmark/subtitle as ONE real flex
+             row (not position:absolute) — a genuine flex sibling of nav/actions,
+             so ordinary space-between + min-width:0 keeps it from ever overlapping
+             them; no geometric-collision edge cases to reason about.
+             Logo is FIRST in DOM order, so in this RTL document it renders at the
+             lockup's visual RIGHT edge — i.e. to the right of "PEAR" / the
+             subtitle — vertically centred via align-items:center (style.css). -->
+        <div class="app-header__brand-lockup">
+            <img class="brand-mark" src="/pear-logo.png" alt="PEAR Logo" decoding="async">
+            <span class="app-header__titles">
+                <span class="app-header__brand">PEAR</span>
+                <!-- CONTENT CLEANUP: dropped the "· Lucy VTON" provider suffix -->
+                <span class="app-header__sub">חדר הלבשה וירטואלי</span>
+            </span>
+        </div>
+
+        <!-- Actions zone (end / left in RTL): cart + engine status dot -->
+        <div class="app-header__actions">
+        <button class="cart-btn" id="cartBtn" type="button" aria-label="סל קניות · Shopping cart">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M6 8h12l-1 11.5a1.5 1.5 0 0 1-1.5 1.4H8.5A1.5 1.5 0 0 1 7 19.5L6 8Z"></path>
+                <path d="M9 8V6.4a3 3 0 0 1 6 0V8"></path>
+            </svg>
+            <span class="cart-btn__count is-empty" id="cartCount">0</span>
+        </button>
+        <span class="app-header__engine" id="engineBadge" title="מנוע">●</span>
+        </div><!-- /.app-header__actions -->
+    </div>
+
+    <div class="container fitting-container">
+        <h2 class="personal-title">ככה המידה <span id="final-size-text"></span> נראית עליך</h2>
+
+        <!-- Active garment chip -->
+        <div class="active-garment" id="activeGarment" hidden>
+            <div class="active-garment__media" id="activeGarmentMedia"></div>
+            <div class="active-garment__meta">
+                <span class="active-garment__eyebrow">פריט נמדד · Now fitting</span>
+                <strong class="active-garment__name" id="activeGarmentName">—</strong>
+                <span class="active-garment__type" id="activeGarmentType"></span>
+            </div>
+        </div>
+
+        <!-- ░░ Camera stage ░░ -->
+        <div class="camera-card" id="cameraCard">
+            <span class="camera-card__live" id="liveBadge"><i></i>LIVE</span>
+
+            <!-- Flip front/rear camera — floating glass control, preview only
+                 (hidden during the billed live session). -->
+            <button class="camera-card__flip" id="flipCamBtn" type="button"
+                    aria-label="הפוך מצלמה · Flip camera" title="הפוך מצלמה">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                     stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M11 19H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/>
+                    <path d="M13 5h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5"/>
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="m18 22-3-3 3-3"/>
+                    <path d="m6 2 3 3-3 3"/>
+                </svg>
+            </button>
+
+            <!-- ░░ Colour swatches — the only floating gallery control on the live stage ░░
+                 #productSwatches — colour bubbles, shown only when the ACTIVE item has 2+
+                 variants; picking one hot-swaps the same WebRTC session in place (no
+                 reconnect, no new token). The old vertical perspective / AI-mode rail and
+                 the "AI source" preview panel were removed — AI Combined is now the sole,
+                 hardcoded try-on mode, applied automatically with no on-screen picker. -->
+            <div class="product-gallery" id="productGallery">
+                <div class="product-swatches" id="productSwatches" role="radiogroup"
+                     aria-label="צבע · Colour" hidden></div>
+            </div>
+
+            <video id="webcam" playsinline autoplay muted></video>
+            <!-- hidden source video carrying the Lucy-VTON-edited realtime stream -->
+            <video id="aiVideo" playsinline autoplay muted></video>
+            <!-- the frozen "masterpiece" snapshot is painted here -->
+            <canvas id="resultCanvas"></canvas>
+
+            <div class="camera-card__guide" id="alignGuide"></div>
+
+            <!-- strict 5-second live countdown — the visible token kill-clock.
+                 Shown only while .show-live; ticks 5→1 then auto-freezes. -->
+            <div class="live-countdown" id="liveCountdown" hidden aria-live="polite">
+                <span class="live-countdown__num" id="liveCountdownNum">5</span>
+                <span class="live-countdown__label">שניות · sec</span>
+            </div>
+
+            <!-- luxury AI scanning overlay — the LOADING state. Stays visible from go-live
+                 until Model Ready (see the state-transition comment on startBillingWindow()
+                 in app.js), not just while an image is mid-process. -->
+            <div class="scan-overlay" id="scanOverlay" hidden>
+                <div class="scan-overlay__lines"></div>
+                <div class="pear-loader" aria-hidden="true">
+                    <img class="pear-loader__fruit" src="/pear-logo.png" alt="" width="48">
+                    <div class="pear-loader__shadow"></div>
+                </div>
+                <div class="scan-overlay__text">מכין את חדר ההלבשה הוירטואלי<span class="dots"><i>.</i><i>.</i><i>.</i></span></div>
+                <!-- CONTENT CLEANUP: generic, provider-free copy — never names the underlying
+                     AI vendor/model. Ticking mm:ss elapsed counter is written here every
+                     second by startScanTimer()/updateScanTimer() in app.js for as long as
+                     the loading phase lasts; "00:00" is just the pre-JS default. -->
+                <div class="scan-overlay__sub" id="scanSub">Preparing Virtual Fitting Room · 00:00</div>
+            </div>
+
+            <div class="camera-card__placeholder" id="camPlaceholder">
+                <div class="camera-card__icon">📷</div>
+                <p>כדי להתחיל במדידה, נשמח לקבל גישה למצלמה. אל דאגה, הצילום משמש למדידת מידות הגוף בלבד ואינו נשמר בשרתים שלנו.</p>
+                <button class="btn-primary" id="startCamBtn">הפעלת מצלמה לתחילת מדידה</button>
+            </div>
+
+            <div class="camera-card__error" id="camError" hidden></div>
+        </div>
+
+        <!-- ░░ Live try-on controls ░░ -->
+        <div class="cam-controls">
+            <button class="btn-capture" id="captureBtn" disabled>
+                <span class="btn-capture__icon">📸</span>
+                <span class="btn-capture__label">מתחילים במדידה</span>
+                <span class="btn-capture__en">Go Live</span>
+            </button>
+            <!-- #retakeBtn now lives inside the unified .pear-interaction-pod below -->
+        </div>
+
+        <!-- ░░ Add to Cart — high-end morphing action (spinner → fly → checkmark) ░░ -->
+        <div class="add-cart-row">
+            <button class="btn-add-cart" id="addToCartBtn" type="button" aria-label="הוסף לסל">
+                <span class="bac__label">
+                    <span class="bac__icon" aria-hidden="true">＋</span>
+                    הוסף לסל <span class="bac__en">· Add to Cart</span>
+                </span>
+                <span class="bac__spinner" aria-hidden="true"></span>
+                <span class="bac__check" aria-hidden="true">✓</span>
+            </button>
+        </div>
+
+        <!-- ░░ Catalog (only when entering WITHOUT a focused product) ░░ -->
+        <section class="catalog-panel" id="catalogPanel" hidden>
+            <h3 class="catalog-title">בחר בגד מהקטלוג</h3>
+            <div class="catalog-grid" id="catalogGrid"></div>
+        </section>
+
+        <!-- ░░ Complete the Look — cross-category recommendations ░░ -->
+        <section class="complete-look" id="completeLook" hidden>
+            <div class="complete-look__head">
+                <h3 class="cl-title">השלמת הלוק <span>· Complete the Look</span></h3>
+                <p class="cl-sub" id="clSub"></p>
+            </div>
+            <!-- Desktop-only scroll arrows (style.css: .cl-arrow, @media min-width:1024px).
+                 .cl-track-wrap does NOT scroll — only #clTrack does — so the arrows, as its
+                 siblings, stay pinned to the carousel's edges regardless of scroll position
+                 instead of scrolling away with the cards. Hidden on touch/mobile: native
+                 swipe already works there, and floating circular buttons over a touch
+                 carousel just get in the way. -->
+            <div class="cl-track-wrap">
+                <!-- SVG chevrons, not "‹"/"›" text: those are Unicode Bidi_Mirrored characters,
+                     so inside this RTL-inheriting page the browser auto-substitutes the
+                     MIRRORED glyph for rendering — "‹" was visually showing as "›" and vice
+                     versa. SVG paths aren't text runs, so they're never subject to the
+                     Unicode Bidi Algorithm and can't flip like this. -->
+                <button class="cl-arrow cl-arrow--prev" id="clArrowPrev" type="button" aria-label="גלול שמאלה · Scroll left">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                         stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M15 6l-6 6 6 6"/>
+                    </svg>
+                </button>
+                <div class="cl-track" id="clTrack"></div>
+                <button class="cl-arrow cl-arrow--next" id="clArrowNext" type="button" aria-label="גלול ימינה · Scroll right">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                         stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M9 6l6 6-6 6"/>
+                    </svg>
+                </button>
+            </div>
+        </section>
+
+        <!-- ░░ PEAR Live-Action Gallery & Retake Pod — unified glass capsule ░░
+             Retake capsule + horizontal "Live Photo" history (5s VTON clips,
+             captured locally — zero server video cost). ░░ -->
+        <section class="pear-interaction-pod" id="pearGallery" aria-label="גלריית מדידות" hidden>
+            <div class="pip-head">
+                <span class="pip-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path><path d="M3 4v4h4"></path><path d="M12 8v4l3 2"></path>
+                    </svg>
+                </span>
+                <h3 class="pip-title">מדידות קודמות <span>· Previous Fits</span></h3>
+                <button class="pip-retake" id="retakeBtn" type="button">
+                    <span class="pip-retake__icon" aria-hidden="true">↺</span>
+                    <span>מדוד שוב</span>
+                    <span class="pip-retake__en">Retake</span>
+                </button>
+                <button class="pip-clear" id="galleryClear" type="button" title="נקה גלריה">נקה</button>
+            </div>
+            <div class="pear-gallery-track" id="galleryTrack"></div>
+
+            <!-- Floating "Compare Looks" pill — slides up when exactly 2 fits are selected -->
+            <button class="pear-compare-bar" id="compareBar" type="button" hidden>
+                <span class="pear-compare-bar__icon" aria-hidden="true">⤢</span>
+                <span>השוואה בין המראה הנבחר</span>
+                <span class="pear-compare-bar__en">Compare Looks</span>
+            </button>
+        </section>
+
+        <!-- ░░ Compare Fits — split-screen liquid-glass overlay ░░ -->
+        <div class="pear-compare-overlay" id="pearCompare" role="dialog" aria-modal="true" aria-label="השוואת מדידות" hidden>
+            <div class="pcmp__backdrop" data-compare-close></div>
+            <div class="pcmp__panel" role="document">
+                <header class="pcmp__head">
+                    <h3 class="pcmp__title">השוואת מדידות <span>· Compare Fits</span></h3>
+                    <button class="pcmp__close" id="compareClose" type="button" aria-label="סגור" data-compare-close>✕</button>
+                </header>
+                <div class="pcmp__split" id="compareSplit"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ░░ "Upload Your Own Garment" — hidden native file input ░░
+     Driven programmatically by the upload card in the catalog grid (app.js). -->
+<input type="file" id="garmentUploadInput" accept="image/*" hidden aria-hidden="true">
+
+<!-- ░░ Garment-detection overlay ░░
+     Opens on upload. Shows the picked image with interactive royal-blue bounding
+     boxes over each detected garment. Hover highlights a box; clicking one crops
+     that garment, closes the overlay, and sets it as the Active Item. Luxury
+     white / royal-blue theme (scoped --royal tokens in style.css). -->
+<div class="gd-overlay" id="garmentDetect" role="dialog" aria-modal="true"
+     aria-label="בחירת בגד מהתמונה שהעלית" hidden>
+  <div class="gd-overlay__backdrop" data-gd-close></div>
+  <div class="gd-overlay__panel" role="document">
+    <header class="gd-head">
+      <div class="gd-head__text">
+        <span class="gd-eyebrow">PEAR · Detect</span>
+        <h3 class="gd-title">בחר/י את הבגד <span>· Select a garment</span></h3>
+        <p class="gd-sub" id="gdSub">מזהה בגדים בתמונה…</p>
+      </div>
+      <button class="gd-close" id="gdClose" type="button" aria-label="סגור" data-gd-close>✕</button>
+    </header>
+
+    <!-- TOP / BOTTOM segmented toggle — shown only for a full worn outfit; snaps the
+         bounding box between the top-garment and bottom-garment sub-regions. -->
+    <div class="gd-tabs" id="gdTabs" role="tablist" aria-label="בחירת סוג בגד" data-active="top" hidden>
+      <button class="gd-tab is-active" type="button" role="tab" data-side="top" aria-selected="true">
+        <span>עליון</span><small>Top</small>
+      </button>
+      <button class="gd-tab" type="button" role="tab" data-side="bottom" aria-selected="false">
+        <span>תחתון</span><small>Bottom</small>
+      </button>
+      <span class="gd-tabs__ind" aria-hidden="true"></span>
+    </div>
+
+    <div class="gd-stage" id="gdStage">
+      <!-- .gd-frame wraps ONLY the image so .gd-boxes { inset:0 } overlaps the
+           rendered image exactly — box coords are % of natural size, scale-free. -->
+      <div class="gd-frame" id="gdFrame">
+        <img class="gd-frame__img" id="gdImage" alt="התמונה שהועלתה" decoding="async">
+        <!-- focus scrim — dims the whole image; each bracket clears its own zone on hover -->
+        <div class="gd-scrim" aria-hidden="true"></div>
+        <div class="gd-boxes" id="gdBoxes"></div>
+
+        <!-- detecting spinner (over the image) -->
+        <div class="gd-loading" id="gdLoading">
+          <span class="gd-spinner" aria-hidden="true"></span>
+          <span class="gd-loading__label">מזהה בגדים…</span>
+        </div>
+      </div>
+
+      <!-- empty state — no garments detected -->
+      <div class="gd-empty" id="gdEmpty" hidden>
+        <span class="gd-empty__icon" aria-hidden="true">🔍</span>
+        <p class="gd-empty__text">לא זוהו בגדים בתמונה.<br><span>Please try another clear image.</span></p>
+        <button class="btn-primary gd-empty__retry" id="gdRetry" type="button">בחר/י תמונה אחרת</button>
+      </div>
+    </div>
+
+    <p class="gd-hint" id="gdHint">לחצ/י על המסגרת הכחולה סביב הבגד שתרצה/י למדוד</p>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     SCREEN 3 — one-time public demo already used (localStorage gate)
+     Shown INSTEAD of Screen 1/2 the moment 'pear_demo_measured' is set: on
+     load for a returning visitor (init(), app.js), and immediately — no
+     reload — the instant the first measurement finishes this session (see
+     lockDemoAfterFirstMeasurement() in app.js). Reuses the exact .calc-shell
+     / .calc-editorial layout Screen 1 uses so no new grid CSS is needed. ════ -->
+<div id="screen-locked" class="screen">
+  <div class="calc-shell">
+    <aside class="calc-editorial">
+      <img class="calc-editorial__img"
+           src="https://images.unsplash.com/photo-1539109136881-3be0616acf4b?w=1100&q=80&sat=-100&auto=format&fit=crop"
+           alt="" aria-hidden="true" loading="eager" onerror="this.remove()">
+      <div class="calc-editorial__scrim"></div>
+      <div class="calc-editorial__content">
+        <span class="calc-editorial__kicker">PEAR · Atelier</span>
+        <h1 class="calc-editorial__headline">תודה שניסית<br>את PEAR</h1>
+        <p class="calc-editorial__lead">חדר הלבשה וירטואלי בזמן אמת — הלוק נמדד על הגוף שלך, מתוך נתונים ולא ניחושים.</p>
+        <span class="calc-editorial__meta">Lookbook № 01 — Monochrome Capsule</span>
+      </div>
+    </aside>
+
+    <div class="calc-main">
+      <div class="container" style="text-align:center">
+        <div class="update-reminder__badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 6 9 17l-5-5"/>
+          </svg>
+        </div>
+        <span class="kicker">PEAR · Personal Fit Engine</span>
+        <h2>המדידה כבר בוצעה</h2>
+        <p class="subtitle">כבר ביצעת את המדידה הווירטואלית שלך בדמו. תודה!</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script type="module" src="app.js?v=6"></script>
+<!-- Additive touch-interaction layer: scroll-reveal, tap ripple, haptics, sticky
+     header shrink. Pure enhancement — touches no app.js logic or state. -->
+<script src="mobile-ux.js" defer></script>
+<!-- Luxury micro-interaction layer: Add-to-Cart fly, Bitten-Pear transition,
+     ambient side rails, magnetic buttons, floating labels. Additive only —
+     touches no app.js logic or state. -->
+<script src="lux-interactions.js" defer></script>
+</body>
+</html>

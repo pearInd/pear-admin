@@ -1,0 +1,24 @@
+{
+  "name": "pear-lucy-vton",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PEAR / MERIDIAN — photorealistic Virtual Try-On powered by Decart Lucy VTON (realtime), fronted by a secure ephemeral-token proxy so the permanent dct_ API key never reaches the browser.",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "scan": "node scanner/scan-store.js",
+    "scan:clothes": "node scripts/batch-scan-clothes.js"
+  },
+  "dependencies": {
+    "@decartai/sdk": "^0.1.5",
+    "@google/genai": "^2.13.0",
+    "@supabase/supabase-js": "^2.108.2",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "googleapis": "^144.0.0"
+  }
+}
