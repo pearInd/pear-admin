@@ -1157,6 +1157,24 @@ html[dir="rtl"] .calc-editorial { border-radius: var(--radius-lg) 0 0 var(--radi
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast b { color: var(--pear); text-decoration: underline; text-underline-offset: 2px; }
 
+/* ── Language toggle — floating glass pill, present on every screen (fixed,
+   opposite corner from .profile-btn's physical top-right so the two never
+   collide once the profile button reveals itself on the fitting screen). ── */
+.pear-lang-toggle {
+  position: fixed; top: 16px; left: 16px; z-index: 100;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 8px 16px; border-radius: var(--pill);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-soft);
+  -webkit-backdrop-filter: blur(10px) saturate(160%); backdrop-filter: blur(10px) saturate(160%);
+  color: var(--ink); font-size: .78rem; font-weight: 700; letter-spacing: .01em;
+  cursor: pointer; box-shadow: var(--shadow-soft), inset 0 1px 0 rgba(255,255,255,.6);
+  transition: transform .3s var(--ease), background .3s var(--ease), box-shadow .3s var(--ease);
+}
+.pear-lang-toggle:hover { transform: translateY(-2px); background: rgba(255,255,255,.7); box-shadow: var(--shadow); }
+.pear-lang-toggle:active { transform: scale(.94); }
+.pear-lang-toggle:focus-visible { outline: 2px solid var(--pear); outline-offset: 2px; }
+
 @media (max-width: 480px) {
   .personal-title { font-size: 1.35rem; }
   .container h2 { font-size: 1.6rem; }

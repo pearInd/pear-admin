@@ -1773,6 +1773,33 @@ app.get("/widget/guide", (req, res) => {
   res.sendFile(path.join(__dirname, "widget/pear-widget-guide.html"));
 });
 
+/* ── Fitting-room entry point (language bootstrap) ───────────────────────────
+   Was plain static (matched by the page-router's directory-index candidate
+   below); now an explicit route so a server-computed default language can be
+   injected into <head> before the page ever paints - Hebrew for Israeli
+   visitors (Vercel's edge-set x-vercel-ip-country), English for everyone else,
+   including when the header is missing (local dev, non-Vercel hosts).
+   window.__PEAR_DEFAULT_LANG__ is only the FALLBACK: app.js prefers a stored
+   localStorage["pear_lang"] choice when one exists, on every later visit.
+   The file changes rarely, so it's read from disk once and cached in memory -
+   every request after that is just a header check + string substitution. */
+let _fittingRoomHtmlCache = null;
+function getFittingRoomHtml() {
+  if (_fittingRoomHtmlCache === null) {
+    _fittingRoomHtmlCache = fs.readFileSync(path.join(__dirname, "fitting-room/index.html"), "utf8");
+  }
+  return _fittingRoomHtmlCache;
+}
+app.get(["/fitting-room", "/fitting-room/"], (req, res) => {
+  const lang = req.headers["x-vercel-ip-country"] === "IL" ? "he" : "en";
+  const html = getFittingRoomHtml().replace(
+    "<head>",
+    `<head>\n    <script>window.__PEAR_DEFAULT_LANG__=${JSON.stringify(lang)};</script>`
+  );
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(html);
+});
+
 /* No root redirect: the dashboard IS index.html at the repo root, so the page
    router below resolves "/" straight to it. (This previously redirected to
    /admin/, which no longer exists — that path would now fall through to this

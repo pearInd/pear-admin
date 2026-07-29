@@ -483,6 +483,38 @@ const SHIRT_NOUN = { sleeveless: "tank top", short_sleeve: "t-shirt", long_sleev
 
 const $ = (s) => document.getElementById(s);
 
+/* ── Language toggle (Stage 1 — detection/persistence/dir-flip only; no
+   translated strings yet, so visible copy stays Hebrew regardless of `lang`) ──
+   server.js reads x-vercel-ip-country and sets window.__PEAR_DEFAULT_LANG__
+   ("he" for IL, "en" for everything else including a missing header) before
+   this script runs — that's only the FALLBACK. A stored localStorage
+   pear_lang choice, once the visitor has ever used the toggle, always wins
+   over the server-computed default on every later visit. */
+const LANG_KEY = "pear_lang";
+
+function getStoredLang() {
+  try {
+    const stored = localStorage.getItem(LANG_KEY);
+    return stored === "he" || stored === "en" ? stored : null;
+  } catch { return null; }
+}
+
+function applyLang(lang) {
+  document.documentElement.lang = lang;
+  document.documentElement.dir = lang === "he" ? "rtl" : "ltr";
+}
+
+function initLangToggle() {
+  let lang = getStoredLang() || (window.__PEAR_DEFAULT_LANG__ === "he" ? "he" : "en");
+  applyLang(lang);
+  $("langToggle")?.addEventListener("click", () => {
+    lang = lang === "he" ? "en" : "he";
+    try { localStorage.setItem(LANG_KEY, lang); } catch {}
+    applyLang(lang);
+  });
+}
+initLangToggle();
+
 /* ── state ───────────────────────────────────────────────────────────────── */
 let currentUserSize = null;
 let activeTryOnSize = null;   // size the user has selected in the Screen 2 override selector
