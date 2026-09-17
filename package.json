@@ -11,7 +11,9 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "scan": "node scanner/scan-store.js",
-    "scan:clothes": "node scripts/batch-scan-clothes.js"
+    "scan:clothes": "node scripts/batch-scan-clothes.js",
+    "test:unit": "node --test \"test/**/*.test.js\"",
+    "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {
     "@decartai/sdk": "^0.1.5",

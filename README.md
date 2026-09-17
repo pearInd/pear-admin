@@ -127,6 +127,43 @@ A few constants you can tweak in `app.js`:
 
 ---
 
+## 🏬 Multi-tenancy (store segmentation)
+
+Every row in `sessions` carries a `store_name`, and the admin dashboard is filtered
+by it server-side. Two roles, set entirely through environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `ADMIN_EMAILS` | **Super-admins** (PEAR staff). Comma-separated. See every store, unfiltered. |
+| `STORE_ACCESS` | **Merchants**. `email:store` pairs — each address is hard-limited to that one store. |
+| `STORE_DOMAINS` | Optional `host:store` pairs used to tag *incoming* try-ons by the garment URL's host. |
+
+```bash
+ADMIN_EMAILS=you@pear-ai.io,partner@pear-ai.io
+STORE_ACCESS=buyer@fox.co.il:FOX,ops@adidas.com:adidas
+STORE_DOMAINS=fox.co.il:FOX,adidas.co.il:adidas
+```
+
+An address in both lists is treated as a super-admin, so staff can never be
+accidentally demoted into a single-store view. A merchant's scope is derived
+**only** from the verified email on their token — never from the request body,
+query string or a header — so it cannot be widened by the caller. The rules live
+in [`lib/store-scope.js`](lib/store-scope.js) and are pinned by `npm run test:unit`.
+
+Sessions that cannot be attributed to a store land as `unassigned`: visible to
+super-admins, invisible to every merchant. Untagged beats misattributed.
+
+**Setup order matters.** Apply `supabase_setup_v8.sql` in the Supabase SQL editor,
+then verify:
+
+```bash
+node scripts/supabase-doctor.js     # env, connectivity, schema-vs-migrations diff
+node scripts/verify-tenancy.js      # proves zero cross-tenant leakage on live data
+npm run test:unit                   # the isolation rules themselves
+```
+
+---
+
 ## ⚠️ Notes & Limitations
 
 - This is a **demo / proof-of-concept**, not a production garment-fitting product.

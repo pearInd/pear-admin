@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { createDecartClient } from "@decartai/sdk";
 import { logTryOn } from "./lib/sheets.js";
 import { authSupabase, appSupabase } from "./lib/supabase.js";
+import { parsePairs, resolveScope, deriveStoreName } from "./lib/store-scope.js";
 
 logTryOn({ garmentName: "Local Test Shirt", size: "XL" }).catch(e => console.error("Sheets test failed:", e.message));
 
@@ -51,6 +52,28 @@ const ALLOWED_ORIGINS = (process.env.DECART_ALLOWED_ORIGINS || "")
      ADMIN_EMAILS=you@example.com,partner@example.com                            */
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "")
   .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+
+/* ── Per-merchant store access (multi-tenancy) ────────────────────────────────
+   Maps a merchant's login email to the ONE store_name they may see. Format is
+   comma-separated email:store pairs — set it in .env AND in the Vercel project:
+
+     STORE_ACCESS=buyer@fox.co.il:FOX,ops@adidas.com:adidas
+
+   Two distinct roles come out of this, and the difference is the whole security
+   model:
+
+     SUPER-ADMIN — email in ADMIN_EMAILS. Sees every store, unfiltered. This is
+       PEAR staff, and it is what keeps today's dashboard working unchanged.
+     MERCHANT    — email in STORE_ACCESS (and NOT in ADMIN_EMAILS). Every query
+       is hard-filtered to their single store_name, server-side.
+
+   ADMIN_EMAILS wins if an address appears in both, so a staff member cannot be
+   accidentally demoted into a single-store view by a stray STORE_ACCESS entry.
+
+   The store name is NOT taken from the request. It is derived here, from the
+   verified email on the token, precisely so that a merchant cannot widen their
+   own scope by passing a query parameter. */
+const STORE_ACCESS = parsePairs(process.env.STORE_ACCESS);
 
 /* Password-reset allowlist — a DELIBERATELY separate, narrower list than
    ADMIN_EMAILS. Being able to read the dashboard and being able to seize an
@@ -417,7 +440,7 @@ app.post("/api/track-tryon", trackLimiter, async (req, res) => {
    Gated behind requireAdminAuth: it previously exposed the Google Sheet ID and the
    service-account email to any anonymous caller and let anyone write test rows.
    Env-var VALUES are no longer echoed - only presence - even to admins. */
-app.get("/api/test-sheets", requireAdminAuth, async (req, res) => {
+app.get("/api/test-sheets", requireAdminAuth, requireSuperAdmin, async (req, res) => {
   const sheetId = process.env.GOOGLE_SHEET_ID;
   const email   = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const key     = process.env.GOOGLE_PRIVATE_KEY;
@@ -636,11 +659,25 @@ async function requireAdminAuth(req, res, next) {
         ok: false, error: "admin_allowlist_unconfigured",
         message: "Admin access is not configured on this deployment.",
       });
-    } else if (!ADMIN_EMAILS.includes(email)) {
+    }
+
+    /* TENANT SCOPE — the single source of truth for data isolation.
+         scope null     → super-admin: no filter, sees every store.
+         scope "<name>" → merchant: every read AND the wipe is restricted to it.
+       Derived from the VERIFIED email only, by resolveScope() in
+       lib/store-scope.js. Deliberately never read from the body, query or a
+       header, so there is no input a merchant could supply to widen it. */
+    const { allowed, scope } = resolveScope(email, {
+      adminEmails: ADMIN_EMAILS, storeAccess: STORE_ACCESS,
+    });
+    if (!allowed) {
       console.warn(`[admin-auth] blocked non-admin login: "${email}"`);
       return res.status(403).json({ ok: false, error: "forbidden", message: "Not an admin account." });
     }
+
     req.adminEmail = email;
+    req.storeScope = scope;
+    if (scope) console.log(`[admin-auth] "${email}" scoped to store "${scope}"`);
     next();
   } catch (err) {
     console.error("[admin-auth] getUser failed:", err?.message);
@@ -648,25 +685,86 @@ async function requireAdminAuth(req, res, next) {
   }
 }
 
-async function readSessionLogs() {
-  const { data, error } = await appSupabase
+/* Gate for routes that are PEAR-internal rather than merchant-facing. Runs after
+   requireAdminAuth, which has already set req.storeScope — a non-null scope means
+   a merchant, and a merchant has no business reading our env wiring or writing to
+   PEAR's own analytics sheet. Deliberately separate from requireAdminAuth so the
+   distinction is visible at the route table rather than buried in a handler. */
+function requireSuperAdmin(req, res, next) {
+  if (req.storeScope) {
+    console.warn(`[admin-auth] merchant "${req.adminEmail}" blocked from super-admin route ${req.path}`);
+    return res.status(403).json({
+      ok: false, error: "forbidden", message: "Not available for store accounts.",
+    });
+  }
+  next();
+}
+
+/* storeScope: null = super-admin (every store), string = that store only.
+   The filter is applied HERE, in the query, rather than by discarding rows after
+   the fetch — a merchant's rows never leave the database, so a bug downstream
+   cannot leak what was never loaded. See supabase_setup_v8.sql for the column
+   and the (store_name, created_at DESC) index this query is shaped around. */
+async function readSessionLogs(storeScope = null) {
+  let q = appSupabase
     .from("sessions")
     .select("*")
     .order("created_at", { ascending: false });
+  if (storeScope) q = q.eq("store_name", storeScope);
+  const { data, error } = await q;
   if (error) throw new Error(error.message);
   return data || [];
 }
 
+/* Survives the window between deploying this code and applying
+   supabase_setup_v8.sql. Vercel redeploys on push, but the migration is run by
+   hand in the SQL editor, so for some interval the running code knows about
+   store_name and the database does not. Without this fallback EVERY try-on in
+   that window is rejected with 42703 and lost for good.
+
+   Two different errors mean "no such column", depending on which layer catches
+   it, and BOTH are checked because the usual one is not the obvious one:
+     PGRST204 — PostgREST rejects the write against its cached schema before the
+                statement ever reaches Postgres. This is what actually happens
+                here ("Could not find the 'store_name' column of 'sessions' in
+                the schema cache"), verified against the live project.
+     42703    — Postgres undefined_column, if the cache is warm but the column is
+                not there (e.g. a rolled-back migration).
+   On those errors — and only those — the row is retried without store_name, so
+   it still lands; once the migration is in, the first insert succeeds and the
+   fallback never runs again. Any other error propagates untouched. */
 async function saveSessionLog(entry) {
   const { error } = await appSupabase.from("sessions").insert([entry]);
-  if (error) throw new Error(error.message);
-  // Return approximate total count without a separate COUNT query.
-  return null;
+  if (!error) return null;
+
+  const missingColumn =
+    error.code === "PGRST204" ||
+    error.code === "42703" ||
+    /store_name/.test(error.message || "");
+  if (missingColumn && "store_name" in entry) {
+    console.warn(
+      "[sessions] sessions.store_name is missing — saving this row untagged. " +
+      "Apply supabase_setup_v8.sql; until then these rows cannot be attributed to a store."
+    );
+    const { store_name, ...withoutStore } = entry;
+    const retry = await appSupabase.from("sessions").insert([withoutStore]);
+    if (retry.error) throw new Error(retry.error.message);
+    return null;
+  }
+
+  throw new Error(error.message);
 }
 
-async function clearSessionLogs() {
-  // Delete every row. Supabase requires a filter for safety; `neq` on id covers all rows.
-  const { error } = await appSupabase.from("sessions").delete().neq("id", 0);
+/* DESTRUCTIVE, and the most dangerous place for the tenant scope to be missing:
+   unscoped, a single merchant pressing "clear" would wipe every OTHER merchant's
+   history too. A scoped caller deletes only their own store's rows; only a
+   super-admin (storeScope null) can empty the whole table. */
+async function clearSessionLogs(storeScope = null) {
+  // Supabase requires a filter for safety; `not is null` on id covers all rows
+  // (id is a UUID here, so the old `neq("id", 0)` cannot be used as a catch-all).
+  let q = appSupabase.from("sessions").delete();
+  q = storeScope ? q.eq("store_name", storeScope) : q.not("id", "is", null);
+  const { error } = await q;
   if (error) throw new Error(error.message);
 }
 
@@ -963,13 +1061,19 @@ async function updateUserMeasurements(req, res) {
 
 /* GET /api/admin/users - open access. Returns every user with their total
    measurement (session) count, newest user first. */
-async function getUsersWithCounts(_req, res) {
+async function getUsersWithCounts(req, res) {
   if (storageUnavailable(res)) return;
   res.set("Cache-Control", "no-store, no-cache, must-revalidate");
   try {
+    // `users` has no store_name of its own — a shopper can try garments at more
+    // than one merchant, so tenancy lives on the SESSION, not the person. A
+    // merchant therefore sees a user only if that user has at least one session
+    // in their store, and the session_count shown is the count WITHIN that store
+    // (not the user's global total, which would leak rival-store activity).
+    const sessionQuery = appSupabase.from("sessions").select("user_id");
     const [{ data: users, error: uErr }, { data: rows, error: sErr }] = await Promise.all([
       appSupabase.from("users").select("*").order("created_at", { ascending: false }),
-      appSupabase.from("sessions").select("user_id"),
+      req.storeScope ? sessionQuery.eq("store_name", req.storeScope) : sessionQuery,
     ]);
     if (uErr) throw new Error(uErr.message);
     if (sErr) throw new Error(sErr.message);
@@ -981,10 +1085,12 @@ async function getUsersWithCounts(_req, res) {
       counts.set(r.user_id, (counts.get(r.user_id) || 0) + 1);
     }
 
-    const withCounts = (users || []).map((u) => ({
-      ...u,
-      session_count: counts.get(u.id) || 0,
-    }));
+    const withCounts = (users || [])
+      .filter((u) => !req.storeScope || counts.has(u.id))
+      .map((u) => ({
+        ...u,
+        session_count: counts.get(u.id) || 0,
+      }));
 
     res.json({ ok: true, count: withCounts.length, users: withCounts });
   } catch (err) {
@@ -997,15 +1103,31 @@ async function getUsersWithCounts(_req, res) {
    users that have both measurements set (users.height/weight, not sessions -
    see publicUser comment: those columns are the single current-measurement
    source of truth per user). */
-async function getAverageMeasurements(_req, res) {
+async function getAverageMeasurements(req, res) {
   if (storageUnavailable(res)) return;
   res.set("Cache-Control", "no-store, no-cache, must-revalidate");
   try {
-    const { data, error } = await appSupabase
+    /* Scoped averages: a merchant's tile must describe THEIR shoppers, not the
+       whole platform. Tenancy is on the session, so narrow to the users who have
+       a session in this store first, then average those users' profiles. An
+       empty id list short-circuits — `.in("id", [])` is a valid but pointless
+       round-trip, and the response shape for "no data" is already defined below. */
+    let userIds = null;
+    if (req.storeScope) {
+      const { data: rows, error: sErr } = await appSupabase
+        .from("sessions").select("user_id").eq("store_name", req.storeScope);
+      if (sErr) throw new Error(sErr.message);
+      userIds = [...new Set((rows || []).map((r) => r.user_id).filter(Boolean))];
+      if (!userIds.length) return res.json({ avgHeight: null, avgWeight: null, count: 0 });
+    }
+
+    let q = appSupabase
       .from("users")
       .select("height, weight")
       .not("height", "is", null)
       .not("weight", "is", null);
+    if (userIds) q = q.in("id", userIds);
+    const { data, error } = await q;
     if (error) throw new Error(error.message);
 
     if (!data.length) {
@@ -1029,6 +1151,15 @@ async function getAverageMeasurements(_req, res) {
 app.get("/api/admin/stats/averages", requireAdminAuth, getAverageMeasurements);
 
 /* ── POST: save a session → appends to sessions.json ─────────────────────── */
+/* Optional host→store map for tagging INCOMING sessions, e.g.
+     STORE_DOMAINS=fox.co.il:FOX,adidas.co.il:adidas
+   Matched on the registrable suffix, so www.fox.co.il and shop.fox.co.il both
+   resolve to FOX without needing an entry each. */
+const STORE_DOMAINS = parsePairs(process.env.STORE_DOMAINS);
+
+/* saveSession tags each new row with deriveStoreName() — explicit field, then
+   garment-URL host, then 'unassigned'. The rule and its rationale live in
+   lib/store-scope.js, next to the tests that pin it. */
 async function saveSession(req, res) {
   if (storageUnavailable(res)) return;
   const b = req.body || {};
@@ -1051,6 +1182,7 @@ async function saveSession(req, res) {
     garment_type:  str(b.garmentType,  40),
     sleeve_type:   str(b.sleeveType,   40),
     pants_fit:     str(b.pantsFit,     40),
+    store_name:    deriveStoreName(b, STORE_DOMAINS),
   };
 
   try {
@@ -1064,12 +1196,18 @@ async function saveSession(req, res) {
 }
 
 /* ── GET: retrieve sessions (open access) → reads from Supabase ───────────── */
-async function getSessions(_req, res) {
+async function getSessions(req, res) {
   if (storageUnavailable(res)) return;
   res.set("Cache-Control", "no-store, no-cache, must-revalidate");
   try {
-    const sessions = await readSessionLogs();   // already newest-first from Supabase ORDER BY
-    console.log(`[admin/sessions] Supabase → ${sessions.length} session(s) found`);
+    // req.storeScope is set by requireAdminAuth: null for super-admins, the
+    // merchant's single store otherwise. Response SHAPE is unchanged either way,
+    // so the dashboard renders identically — only the row set narrows.
+    const sessions = await readSessionLogs(req.storeScope);   // newest-first from Supabase ORDER BY
+    console.log(
+      `[admin/sessions] Supabase → ${sessions.length} session(s) found` +
+      (req.storeScope ? ` (store "${req.storeScope}")` : " (all stores)")
+    );
     res.json({ ok: true, count: sessions.length, sessions });
   } catch (err) {
     console.error("[admin/sessions] read failed:", err?.message);
@@ -1081,8 +1219,11 @@ async function getSessions(_req, res) {
 async function clearSessions(req, res) {
   if (storageUnavailable(res)) return;
   try {
-    await clearSessionLogs();
-    console.log(`[sessions] cleared all → Supabase (by admin: ${req.adminEmail || "unknown"})`);
+    await clearSessionLogs(req.storeScope);
+    console.log(
+      `[sessions] cleared ${req.storeScope ? `store "${req.storeScope}"` : "ALL stores"}` +
+      ` → Supabase (by admin: ${req.adminEmail || "unknown"})`
+    );
     res.json({ ok: true });
   } catch (err) {
     console.error("[sessions] clear failed:", err?.message);
@@ -1127,7 +1268,10 @@ app.get("/api/admin/users",       requireAdminAuth, getUsersWithCounts);
 
    Returns only the caller's own verified email — nothing they did not present. */
 app.get("/api/admin/whoami", authLimiter, requireAdminAuth, (req, res) => {
-  res.json({ ok: true, email: req.adminEmail });
+  // `store` is additive: null for a super-admin, the store name for a merchant.
+  // The existing dashboard ignores unknown fields, so this changes no rendering —
+  // it exists so the scope is checkable without reading server logs.
+  res.json({ ok: true, email: req.adminEmail, store: req.storeScope ?? null });
 });
 
 /* GET /api/admin/diagnostics — what THIS running process actually sees.
@@ -1142,7 +1286,7 @@ app.get("/api/admin/whoami", authLimiter, requireAdminAuth, (req, res) => {
    secret and already ships in the browser bundle. Key roles come from the
    public claims of the API key. No key material is ever returned, and the whole
    endpoint sits behind requireAdminAuth. */
-app.get("/api/admin/diagnostics", authLimiter, requireAdminAuth, (_req, res) => {
+app.get("/api/admin/diagnostics", authLimiter, requireAdminAuth, requireSuperAdmin, (_req, res) => {
   const refFromUrl = (u) => (String(u || "").match(/^https:\/\/([^.]+)\./) || [])[1] || null;
   const claim = (k, field) => {
     try {
@@ -1168,6 +1312,15 @@ app.get("/api/admin/diagnostics", authLimiter, requireAdminAuth, (_req, res) => 
     authProject: describe("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", authSupabase),
     appProject:  describe("APP_SUPABASE_URL", "APP_SUPABASE_SERVICE_ROLE_KEY", appSupabase),
     adminEmailsCount: ADMIN_EMAILS.length,
+    // Tenancy wiring. Counts and store NAMES only — store names are not secret
+    // (they are the merchant's own brand) but the merchant EMAILS are PII, so
+    // they are deliberately not listed here.
+    tenancy: {
+      superAdmins:    ADMIN_EMAILS.length,
+      scopedAccounts: STORE_ACCESS.size,
+      stores:         [...new Set(STORE_ACCESS.values())].sort(),
+      storeDomainMappings: STORE_DOMAINS.size,
+    },
     resendConfigured: Boolean(process.env.RESEND_API_KEY),
     // Any APP_*/SUPABASE_* names the process can see. A near-miss here (a typo,
     // or SUPABASE_ vs APP_SUPABASE_) is the usual explanation for a variable
