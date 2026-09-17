@@ -77,7 +77,7 @@ async function main() {
 
   /* 2 ── the foreign key is back, and PostgREST can see the relationship ────── */
   const fkNote = props.user_id?.description || "";
-  /Foreign Key to users\.id/i.test(fkNote)
+  /Foreign Key to `?users\.id`?/i.test(fkNote)
     ? ok("sessions.user_id → users.id foreign key present")
     : no("sessions.user_id has NO foreign key — step 5 of the migration did not run.");
 

@@ -74,6 +74,7 @@ const EXPECTED_SESSIONS_COLUMNS = [
   "id", "session_id", "height", "weight", "chest", "waist", "legs", "size",
   "garment_id", "garment_name", "garment_type", "sleeve_type", "pants_fit",
   "created_at", "user_id",
+  "store_name",            // supabase_setup_v8.sql
 ];
 
 let failures = 0;
@@ -222,7 +223,9 @@ function columnsOf(table) {
     type: p.format || p.type || "?",
     required: required.has(name),
     pk: /Primary Key/i.test(p.description || ""),
-    fk: (p.description || "").match(/Foreign Key to (\w+\.\w+)/i)?.[1] || null,
+    // Supabase renders the note as: Foreign Key to `users.id`. The backticks are
+    // NOT optional in practice — omitting them here silently reports "no FK".
+    fk: (p.description || "").match(/Foreign Key to `?(\w+\.\w+)`?/i)?.[1] || null,
     default: p.default,
   }));
 }
