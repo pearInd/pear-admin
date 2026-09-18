@@ -5,7 +5,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parsePairs, resolveScope, deriveStoreName, UNASSIGNED } from "../lib/store-scope.js";
+import { parsePairs, resolveScope, deriveStoreName, effectiveStore, UNASSIGNED } from "../lib/store-scope.js";
 
 const ADMINS = ["itaiarazi99@gmail.com", "grtnryyr@gmail.com", "pearytrank@gmail.com"];
 const ACCESS = parsePairs("buyer@fox.co.il:FOX,ops@adidas.com:adidas");
@@ -106,6 +106,69 @@ test("a merchant cannot escalate by claiming an admin address they don't hold", 
     resolveScope("buyer@fox.co.il\n itaiarazi99@gmail.com", opts), { allowed: false }
   );
   assert.deepEqual(resolveScope("itaiarazi99@gmail.com ", opts), { allowed: true, scope: null });
+});
+
+/* ── effectiveStore: the super-admin selector vs. a merchant's fixed scope ──
+   This is the surface the store dropdown added, and the one place a merchant
+   could conceivably have widened their reach, so it is tested hardest. */
+
+test("super-admin with no parameter sees all stores", () => {
+  assert.equal(effectiveStore(null, undefined), null);
+  assert.equal(effectiveStore(null, ""), null);
+  assert.equal(effectiveStore(null, "   "), null);
+});
+
+test("super-admin can narrow to a chosen store", () => {
+  assert.equal(effectiveStore(null, "FOX"), "FOX");
+  assert.equal(effectiveStore(null, "adidas"), "adidas");
+  assert.equal(effectiveStore(null, UNASSIGNED), UNASSIGNED);
+});
+
+test("super-admin's parameter is trimmed", () => {
+  assert.equal(effectiveStore(null, "  FOX  "), "FOX");
+});
+
+test("MERCHANT CANNOT ESCAPE THEIR SCOPE via store_name", () => {
+  // Every shape of the parameter a merchant could send. The scope wins, always.
+  for (const attempt of [
+    "adidas", "PEAR", UNASSIGNED, "", "   ", undefined, null,
+    "FOX,adidas", "*", "%", "fox", "FOX ",
+  ]) {
+    assert.equal(effectiveStore("FOX", attempt), "FOX",
+      `merchant scope leaked with store_name=${JSON.stringify(attempt)}`);
+  }
+});
+
+test("a repeated query parameter cannot inject an array filter", () => {
+  // Express yields an ARRAY for ?store_name=a&store_name=b. Passing that into
+  // .eq() would build a malformed filter, so it must degrade to "all stores"
+  // for a super-admin and to the fixed store for a merchant.
+  assert.equal(effectiveStore(null, ["FOX", "adidas"]), null);
+  assert.equal(effectiveStore("FOX", ["adidas", "PEAR"]), "FOX");
+});
+
+test("non-string parameter types are ignored, not coerced", () => {
+  for (const v of [42, true, {}, { store_name: "adidas" }, () => "adidas"]) {
+    assert.equal(effectiveStore(null, v), null);
+    assert.equal(effectiveStore("FOX", v), "FOX");
+  }
+});
+
+test("end-to-end with the selector: email + parameter -> query filter", () => {
+  const cases = [
+    // [email, ?store_name=, expected filter]
+    ["itaiarazi99@gmail.com", undefined, []],                        // super, all
+    ["itaiarazi99@gmail.com", "FOX",     [["store_name", "FOX"]]],   // super, narrowed
+    ["itaiarazi99@gmail.com", "",        []],                        // super, back to all
+    ["buyer@fox.co.il",       undefined, [["store_name", "FOX"]]],   // merchant
+    ["buyer@fox.co.il",       "adidas",  [["store_name", "FOX"]]],   // merchant, tampering
+  ];
+  for (const [email, requested, expected] of cases) {
+    const { allowed, scope } = resolveScope(email, opts);
+    assert.ok(allowed, `${email} should be allowed`);
+    assert.deepEqual(applyScope(effectiveStore(scope, requested)), expected,
+      `${email} with store_name=${JSON.stringify(requested)}`);
+  }
 });
 
 /* ── deriveStoreName: tagging incoming sessions ───────────────────────────── */

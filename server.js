@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 import { createDecartClient } from "@decartai/sdk";
 import { logTryOn } from "./lib/sheets.js";
 import { authSupabase, appSupabase } from "./lib/supabase.js";
-import { parsePairs, resolveScope, deriveStoreName } from "./lib/store-scope.js";
+import { parsePairs, resolveScope, deriveStoreName, effectiveStore } from "./lib/store-scope.js";
 
 logTryOn({ garmentName: "Local Test Shirt", size: "XL" }).catch(e => console.error("Sheets test failed:", e.message));
 
@@ -1070,10 +1070,11 @@ async function getUsersWithCounts(req, res) {
     // merchant therefore sees a user only if that user has at least one session
     // in their store, and the session_count shown is the count WITHIN that store
     // (not the user's global total, which would leak rival-store activity).
+    const store = effectiveStore(req.storeScope, req.query.store_name);
     const sessionQuery = appSupabase.from("sessions").select("user_id");
     const [{ data: users, error: uErr }, { data: rows, error: sErr }] = await Promise.all([
       appSupabase.from("users").select("*").order("created_at", { ascending: false }),
-      req.storeScope ? sessionQuery.eq("store_name", req.storeScope) : sessionQuery,
+      store ? sessionQuery.eq("store_name", store) : sessionQuery,
     ]);
     if (uErr) throw new Error(uErr.message);
     if (sErr) throw new Error(sErr.message);
@@ -1086,7 +1087,7 @@ async function getUsersWithCounts(req, res) {
     }
 
     const withCounts = (users || [])
-      .filter((u) => !req.storeScope || counts.has(u.id))
+      .filter((u) => !store || counts.has(u.id))
       .map((u) => ({
         ...u,
         session_count: counts.get(u.id) || 0,
@@ -1112,10 +1113,11 @@ async function getAverageMeasurements(req, res) {
        a session in this store first, then average those users' profiles. An
        empty id list short-circuits — `.in("id", [])` is a valid but pointless
        round-trip, and the response shape for "no data" is already defined below. */
+    const store = effectiveStore(req.storeScope, req.query.store_name);
     let userIds = null;
-    if (req.storeScope) {
+    if (store) {
       const { data: rows, error: sErr } = await appSupabase
-        .from("sessions").select("user_id").eq("store_name", req.storeScope);
+        .from("sessions").select("user_id").eq("store_name", store);
       if (sErr) throw new Error(sErr.message);
       userIds = [...new Set((rows || []).map((r) => r.user_id).filter(Boolean))];
       if (!userIds.length) return res.json({ avgHeight: null, avgWeight: null, count: 0 });
@@ -1201,12 +1203,15 @@ async function getSessions(req, res) {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate");
   try {
     // req.storeScope is set by requireAdminAuth: null for super-admins, the
-    // merchant's single store otherwise. Response SHAPE is unchanged either way,
-    // so the dashboard renders identically — only the row set narrows.
-    const sessions = await readSessionLogs(req.storeScope);   // newest-first from Supabase ORDER BY
+    // merchant's single store otherwise. effectiveStore() lets a SUPER-ADMIN
+    // narrow to one store via ?store_name=, while a merchant's scope overrides
+    // the parameter entirely. Response SHAPE is unchanged either way, so the
+    // dashboard renders identically — only the row set narrows.
+    const store = effectiveStore(req.storeScope, req.query.store_name);
+    const sessions = await readSessionLogs(store);   // newest-first from Supabase ORDER BY
     console.log(
       `[admin/sessions] Supabase → ${sessions.length} session(s) found` +
-      (req.storeScope ? ` (store "${req.storeScope}")` : " (all stores)")
+      (store ? ` (store "${store}")` : " (all stores)")
     );
     res.json({ ok: true, count: sessions.length, sessions });
   } catch (err) {
@@ -1219,9 +1224,13 @@ async function getSessions(req, res) {
 async function clearSessions(req, res) {
   if (storageUnavailable(res)) return;
   try {
-    await clearSessionLogs(req.storeScope);
+    // A super-admin who has filtered the dashboard to one store clears only that
+    // store; "All Stores" still wipes everything. A merchant is pinned to their
+    // own store regardless of what they send.
+    const store = effectiveStore(req.storeScope, req.query.store_name);
+    await clearSessionLogs(store);
     console.log(
-      `[sessions] cleared ${req.storeScope ? `store "${req.storeScope}"` : "ALL stores"}` +
+      `[sessions] cleared ${store ? `store "${store}"` : "ALL stores"}` +
       ` → Supabase (by admin: ${req.adminEmail || "unknown"})`
     );
     res.json({ ok: true });
@@ -1251,6 +1260,47 @@ app.post("/api/users",            userLimiter, createUser);
 app.get("/api/users/:deviceId",   getUserByDevice);
 app.patch("/api/users/:deviceId", userLimiter, updateUserMeasurements);
 app.get("/api/admin/users",       requireAdminAuth, getUsersWithCounts);
+
+/* GET /api/admin/stores — the store list behind the dashboard's store selector.
+
+   SUPER-ADMIN ONLY, deliberately. A merchant has exactly one store and is never
+   offered the selector, so handing them the roster of every OTHER merchant on
+   the platform would leak the customer list for no functional gain.
+
+   Derived from the data (DISTINCT store_name in `sessions`), not from
+   STORE_ACCESS, so a store that has try-ons but no merchant login yet — which is
+   every store today — is still selectable. Counts ride along so the UI can show
+   them without a second round-trip. */
+app.get("/api/admin/stores", requireAdminAuth, requireSuperAdmin, async (_req, res) => {
+  if (storageUnavailable(res)) return;
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  try {
+    // Supabase has no DISTINCT helper on the REST client, so tally in one pass
+    // over a single narrow column. At current volume (hundreds of rows) this is
+    // far cheaper than the round-trips a per-store count query would cost.
+    const { data, error } = await appSupabase.from("sessions").select("store_name");
+    if (error) throw new Error(error.message);
+
+    const counts = new Map();
+    for (const r of data || []) {
+      if (!r.store_name) continue;
+      counts.set(r.store_name, (counts.get(r.store_name) || 0) + 1);
+    }
+    const stores = [...counts.entries()]
+      .map(([store_name, count]) => ({ store_name, count }))
+      .sort((a, b) => b.count - a.count || a.store_name.localeCompare(b.store_name));
+
+    // total is the SUM of the per-store counts, not the raw row count, so the
+    // "All Stores (N)" label can never disagree with the options beneath it.
+    // They are equal while store_name is NOT NULL; deriving it keeps them equal
+    // if that ever stops being true.
+    const total = stores.reduce((n, s) => n + s.count, 0);
+    res.json({ ok: true, count: stores.length, total, stores });
+  } catch (err) {
+    console.error("[admin/stores] read failed:", err?.message);
+    res.status(500).json({ ok: false, error: err?.message, stores: [], count: 0 });
+  }
+});
 
 /* Authorization probe for the login screen. Sign-in itself is now plain
    Supabase signInWithPassword() straight from the browser — authentication no

@@ -226,6 +226,15 @@
           <span class="dash-top__sub">Session Analytics</span>
         </div>
         <div class="dash-top__actions">
+          <!-- Super-admins only. Stays hidden until GET /api/admin/whoami confirms
+               the session has no store scope; a merchant never sees it, and the
+               server ignores the parameter it sets regardless. -->
+          <label id="storeFilterWrap" class="store-filter" hidden>
+            <span class="store-filter__label">Store</span>
+            <select id="storeFilter" class="store-filter__select" aria-label="Filter dashboard by store">
+              <option value="">All Stores</option>
+            </select>
+          </label>
           <button id="refreshBtn" class="dash-btn" type="button">Refresh</button>
           <button id="clearBtn"   class="dash-btn" type="button">Clear all</button>
           <button id="logoutBtn"  class="dash-btn" type="button">Logout</button>
@@ -869,6 +878,120 @@
       });
     }
 
+    /* ── Store filter (super-admins only) ───────────────────────────────────
+       "" means All Stores. Every dashboard fetch runs through withStore(), so a
+       new panel cannot silently escape the filter by building its own URL.
+
+       The value is a CONVENIENCE, never a permission: the server derives a
+       merchant's scope from their verified token and ignores this parameter
+       outright, so tampering with it in devtools widens nothing. */
+    const STORE_KEY = "pear_admin_store_filter";
+    let selectedStore = "";      // super-admin's choice; "" = All Stores
+    let merchantStore = "";      // a merchant's server-enforced store, for labelling
+    let isSuperAdmin = false;
+
+    /* Read but NOT applied yet. Applying a remembered filter before the selector
+       is proven to render would leave a super-admin looking at a silently
+       filtered dashboard with no visible control to clear it — so this is only
+       promoted to selectedStore once the dropdown is actually on screen. */
+    let rememberedStore = "";
+    try { rememberedStore = localStorage.getItem(STORE_KEY) || ""; } catch { rememberedStore = ""; }
+
+    function forgetStore() {
+      try { localStorage.removeItem(STORE_KEY); } catch { /* private mode */ }
+    }
+
+    function withStore(url) {
+      return selectedStore
+        ? url + "&store_name=" + encodeURIComponent(selectedStore)
+        : url;
+    }
+
+    /* The store the current view actually acts on: a super-admin's selection, or
+       a merchant's fixed store. "" only when a super-admin is on All Stores. */
+    function activeStore() {
+      return isSuperAdmin ? selectedStore : merchantStore;
+    }
+
+    /* Keeps the destructive button honest about what it will actually delete —
+       the server scopes the wipe to the same filter the dashboard is showing, and
+       a merchant is scoped whether or not they can see a selector. */
+    function syncClearButton() {
+      const btn = $("clearBtn");
+      if (!btn) return;
+      const store = activeStore();
+      btn.textContent = store ? `Clear ${store}` : "Clear all";
+    }
+
+    /* Establishes the role and, for a super-admin, fills the selector.
+
+       This runs here rather than reusing the login flow's whoami answer because
+       startDashboard has THREE entry points — a fresh sign-in, the SIGNED_IN
+       auth event, and session restore on page load — and only the first of them
+       ever probed whoami. Asking once here covers all three identically.
+
+       Fails closed: any error leaves isSuperAdmin false and the selector hidden,
+       so a blip shows the unfiltered dashboard a super-admin already had rather
+       than exposing a control to someone who should not have it. */
+    async function initStoreFilter() {
+      const wrap = $("storeFilterWrap");
+      const sel  = $("storeFilter");
+      if (!wrap || !sel) return;
+
+      try {
+        const who = await authedFetch("/api/admin/whoami?_=" + Date.now(), { cache: "no-store" });
+        if (!who.ok) return;
+        const info = await who.json().catch(() => null);
+        // store === null is the super-admin marker (server: req.storeScope).
+        isSuperAdmin = Boolean(info && info.ok && info.store == null);
+        if (!isSuperAdmin) {
+          // A merchant is pinned server-side. Remember their store for the Clear
+          // label, and drop any stale filter this browser kept from a previous
+          // super-admin session on the same machine.
+          merchantStore = (info && typeof info.store === "string") ? info.store : "";
+          forgetStore();
+          syncClearButton();
+          return;
+        }
+
+        const res = await authedFetch("/api/admin/stores?_=" + Date.now(), { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json().catch(() => null);
+        const stores = Array.isArray(data && data.stores) ? data.stores : [];
+
+        const total = typeof data?.total === "number" ? data.total : null;
+        sel.innerHTML =
+          `<option value="">All Stores${total != null ? ` (${total})` : ""}</option>` +
+          stores.map((s) =>
+            `<option value="${esc(s.store_name)}">${esc(s.store_name)} (${s.count})</option>`
+          ).join("");
+
+        // Promote the remembered filter only now, with the control on screen and
+        // the store confirmed to still exist — a store whose rows were all
+        // cleared would otherwise filter the dashboard to nothing.
+        selectedStore = stores.some((s) => s.store_name === rememberedStore)
+          ? rememberedStore
+          : "";
+        if (selectedStore !== rememberedStore) forgetStore();
+
+        sel.value = selectedStore;
+        syncClearButton();
+        wrap.hidden = false;
+
+        sel.addEventListener("change", () => {
+          selectedStore = sel.value || "";
+          try {
+            if (selectedStore) localStorage.setItem(STORE_KEY, selectedStore);
+            else localStorage.removeItem(STORE_KEY);
+          } catch { /* private mode — the filter still works for this session */ }
+          syncClearButton();
+          loadSessions();
+        });
+      } catch (err) {
+        console.error("[admin] initStoreFilter failed:", err);
+      }
+    }
+
     /* ── Logout ─────────────────────────────────────────────────────────── */
     const logoutBtn = $("logoutBtn");
     if (logoutBtn) logoutBtn.addEventListener("click", async () => {
@@ -904,12 +1027,22 @@
     const refreshBtn = $("refreshBtn");
     if (refreshBtn) refreshBtn.addEventListener("click", () => loadSessions());
 
+    /* Scoped to whatever the dashboard is currently showing. The confirm names
+       the store explicitly, so "Clear FOX" can never be read as "clear everything"
+       — and the server applies the same filter, so the label cannot drift from
+       what is actually deleted. */
     const clearBtn = $("clearBtn");
     if (clearBtn) clearBtn.addEventListener("click", async () => {
-      if (!confirm("Delete ALL session data permanently? This cannot be undone.")) return;
+      const store = activeStore();
+      const message = store
+        ? `Delete all "${store}" sessions permanently?\n\n` +
+          "Sessions from every other store are NOT affected. This cannot be undone."
+        : "Delete ALL session data, across every store, permanently?\n\n" +
+          "This cannot be undone.";
+      if (!confirm(message)) return;
       clearBtn.disabled = true;
       try {
-        const res = await authedFetch("/api/sessions", { method: "DELETE" });
+        const res = await authedFetch(withStore("/api/sessions?_=" + Date.now()), { method: "DELETE" });
         if (!res.ok) throw new Error("Server error " + res.status);
         await loadSessions();
       } catch (err) {
@@ -923,7 +1056,7 @@
     /* ── Data fetch helpers - reused by the dashboard (limited) views AND the
        "הצג הכל" full-page overlays, which always pull fresh data. ─────────── */
     async function fetchAllSessions() {
-      const url = "/api/sessions?_=" + Date.now();
+      const url = withStore("/api/sessions?_=" + Date.now());
       const res = await authedFetch(url, { cache: "no-store" });
       if (res.status === 401) { await adminSupabase.auth.signOut(); showLogin(); throw new Error("Unauthorized"); }
       const rawText = await res.text();
@@ -937,7 +1070,7 @@
     }
 
     async function fetchAllUsers() {
-      const url = "/api/admin/users?_=" + Date.now();
+      const url = withStore("/api/admin/users?_=" + Date.now());
       const res = await authedFetch(url, { cache: "no-store" });
       if (res.status === 401) { await adminSupabase.auth.signOut(); showLogin(); throw new Error("Unauthorized"); }
       const data = await res.json().catch(() => null);
@@ -1149,7 +1282,7 @@
     /* average height/weight across all users - GET /api/admin/stats/averages */
     async function loadAverages() {
       try {
-        const url = "/api/admin/stats/averages?_=" + Date.now();
+        const url = withStore("/api/admin/stats/averages?_=" + Date.now());
         const res = await authedFetch(url, { cache: "no-store" });
         if (res.status === 401) { await adminSupabase.auth.signOut(); showLogin(); return; }
         const data = await res.json().catch(() => null);
@@ -1222,7 +1355,10 @@
     if (btnShowAllGarments) btnShowAllGarments.addEventListener("click", showAllGarments);
     if (btnShowAllSizes)    btnShowAllSizes.addEventListener("click", showAllSizes);
 
-    loadSessions();
+    // Resolve the role and the remembered filter BEFORE the first load, so the
+    // dashboard paints once with the right data instead of rendering every store
+    // and then visibly re-rendering filtered.
+    initStoreFilter().finally(loadSessions);
   }
 
   /* ── Entry point: check existing session, show login or dashboard ────────── */

@@ -153,6 +153,22 @@ in [`lib/store-scope.js`](lib/store-scope.js) and are pinned by `npm run test:un
 Sessions that cannot be attributed to a store land as `unassigned`: visible to
 super-admins, invisible to every merchant. Untagged beats misattributed.
 
+### Store selector
+
+Super-admins get a **Store** dropdown in the dashboard toolbar, populated from
+`GET /api/admin/stores` (distinct `store_name` values with row counts). Choosing
+a store re-filters every tile, table and ranking; "All Stores" is the default and
+the choice is remembered per browser.
+
+While a store is selected, **Clear** acts only on that store and relabels itself
+(`Clear FOX`), so the button can never delete more than what is on screen.
+
+Merchants never receive the dropdown — `/api/admin/stores` answers 403 for them,
+so the roster of other merchants is not exposed. Every stats endpoint accepts an
+optional `?store_name=`, but it is honoured **only** for super-admins: a
+merchant's scope comes from their verified token and overrides the parameter
+outright (see `effectiveStore()` in [`lib/store-scope.js`](lib/store-scope.js)).
+
 **Setup order matters.** Apply `supabase_setup_v8.sql` in the Supabase SQL editor,
 then verify:
 

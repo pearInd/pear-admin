@@ -190,6 +190,77 @@ h1, h2, h3, h4 {
 .dash-btn:focus-visible { outline: none; box-shadow: 0 0 0 4px var(--pear-ring), var(--shadow-soft); }
 .dash-btn:disabled { opacity: .55; cursor: not-allowed; transform: none; box-shadow: none; }
 
+/* ── Store filter - super-admin only, sits alongside the toolbar buttons ─────
+   Built from the same frosted-glass capsule as .dash-btn so it reads as one of
+   the toolbar controls rather than a browser widget dropped into the bar. The
+   native <select> is kept (accessible, keyboard-navigable, correct on mobile);
+   only its chrome is replaced, with a drawn caret standing in for the native
+   arrow that appearance:none removes. */
+.store-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px 5px 16px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--pill);
+  background: var(--glass-strong);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  box-shadow: var(--shadow-soft);
+  transition: transform .4s var(--ease), box-shadow .4s var(--ease),
+              border-color .3s var(--ease);
+}
+.store-filter:hover {
+  transform: translateY(-2px);
+  border-color: rgba(141, 182, 0, .5);
+  box-shadow: 0 10px 26px rgba(141, 182, 0, .18);
+}
+/* Mirrors .dash-btn:focus-visible, but on the wrapper — the ring has to appear
+   around the whole capsule, not the inner <select> whose own outline is removed. */
+.store-filter:focus-within {
+  border-color: rgba(141, 182, 0, .5);
+  box-shadow: 0 0 0 4px var(--pear-ring), var(--shadow-soft);
+}
+.store-filter__label {
+  font-family: "Inter", sans-serif;
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  pointer-events: none;
+}
+.store-filter__select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: transparent;
+  /* Right padding leaves room for the caret drawn below. */
+  padding: 6px 30px 6px 4px;
+  color: var(--ink);
+  font-family: "Inter", sans-serif;
+  font-weight: 700;
+  font-size: .9rem;
+  cursor: pointer;
+  outline: none;
+  /* Two gradients form the caret: the visible chevron sits at the right edge. */
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink) 50%),
+    linear-gradient(135deg, var(--ink) 50%, transparent 50%);
+  background-position: right 14px top 52%, right 9px top 52%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+/* The popup list is OS-rendered and does not inherit the glass surface, so give
+   the options an explicit solid background — on a translucent parent they would
+   otherwise render as unreadable light-on-light in some browsers. */
+.store-filter__select option {
+  background: #ffffff;
+  color: var(--ink);
+  font-weight: 600;
+}
+.store-filter[hidden] { display: none; }
+
 /* ── Section card - floating frosted-glass pane (fitting-room container) ───── */
 .card {
   position: relative;
