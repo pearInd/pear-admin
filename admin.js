@@ -296,7 +296,7 @@
            room's size switches and cart adds (room_events). -->
       <section class="card" dir="rtl">
         <h2 class="card__title">התלבטות בין מידות</h2>
-        <div class="stat-row">
+        <div class="stat-row stat-row--four">
           <div class="stat-card">
             <span class="stat-card__num" id="hesTotal">0</span>
             <span class="stat-card__label">לקוחות שהתלבטו</span>

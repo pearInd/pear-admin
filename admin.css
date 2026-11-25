@@ -702,3 +702,14 @@ h1, h2, h3, h4 {
     line-height: 1.4;
     margin-top: 2px;
 }
+
+/* Size hesitation card (2026-11-25): its two sub-headings */
+.card__subtitle {
+  margin: 22px 0 10px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+.stat-row--four { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 900px) { .stat-row--four { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .stat-row--four { grid-template-columns: 1fr; } }
