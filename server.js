@@ -28,6 +28,7 @@ import { createDecartClient } from "@decartai/sdk";
 import { logTryOn } from "./lib/sheets.js";
 import { authSupabase, appSupabase } from "./lib/supabase.js";
 import { parsePairs, resolveScope, deriveStoreName, effectiveStore } from "./lib/store-scope.js";
+import { summarizeSizeHesitation } from "./lib/size-hesitation.js";
 
 logTryOn({ garmentName: "Local Test Shirt", size: "XL" }).catch(e => console.error("Sheets test failed:", e.message));
 
@@ -1151,6 +1152,67 @@ async function getAverageMeasurements(req, res) {
 }
 
 app.get("/api/admin/stats/averages", requireAdminAuth, getAverageMeasurements);
+
+/* ── Size hesitation - GET /api/admin/size-hesitation (2026-11-25) ───────────────
+   Which sizes shoppers switch between in the fitting room and which they end on.
+   Rows come from `room_events` (supabase_setup_v9.sql), written by the room through
+   Pear's POST /api/room-event; lib/size-hesitation.js does the counting. The rows
+   carry the store's HOST, so the store is derived with the same STORE_DOMAINS map
+   ingest uses (deriveStoreName) and the merchant scope is applied after it. A table
+   not created yet answers an empty summary with `missingTable`, never a 500 - the
+   dashboard says the migration is pending instead of showing an error. */
+const ROOM_EVENTS_READ_LIMIT = 20000;
+const ROOM_EVENT_TYPES = ["size_pick", "cart_add", "cart_open"];
+function roomEventStore(row) {
+  const host = row && row.store_host;
+  return host ? deriveStoreName({ garmentUrl: "https://" + host + "/" }, STORE_DOMAINS) : "unassigned";
+}
+/* The scoped read both admin sections use. Returns { rows } or { missingTable: true }
+   (the migration not run yet). Each row gets `store_name` derived from its host. */
+async function readRoomEvents(req, types) {
+  const store = effectiveStore(req.storeScope, req.query.store_name);
+  const { data, error } = await appSupabase
+    .from("room_events")
+    .select("created_at,event_type,session_id,store_host,garment_id,garment_name,size,from_size,rec_size,data")
+    .in("event_type", types)
+    .order("created_at", { ascending: false })
+    .limit(ROOM_EVENTS_READ_LIMIT);
+  if (error) {
+    if (/room_events/.test(error.message || "") || error.code === "42P01" || error.code === "PGRST205") {
+      return { rows: [], missingTable: true };
+    }
+    throw new Error(error.message);
+  }
+  const rows = (data || []).map((r) => ({ ...r, store_name: roomEventStore(r) }));
+  return { rows: store ? rows.filter((r) => r.store_name === store) : rows, missingTable: false };
+}
+/* GET /api/admin/room-events?type=cart_add,cart_open - the raw scoped rows, newest
+   first, for any admin section that counts room actions (the cart section). */
+app.get("/api/admin/room-events", requireAdminAuth, async (req, res) => {
+  if (storageUnavailable(res)) return;
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  try {
+    const asked = typeof req.query.type === "string" ? req.query.type.split(",").map((t) => t.trim()) : [];
+    const types = asked.filter((t) => ROOM_EVENT_TYPES.includes(t));
+    const out = await readRoomEvents(req, types.length ? types : ROOM_EVENT_TYPES);
+    res.json({ ok: true, missingTable: out.missingTable, count: out.rows.length, events: out.rows });
+  } catch (err) {
+    console.error("[admin/room-events] read failed:", err?.message);
+    res.status(500).json({ ok: false, error: err?.message });
+  }
+});
+async function getSizeHesitation(req, res) {
+  if (storageUnavailable(res)) return;
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  try {
+    const out = await readRoomEvents(req, ["size_pick", "cart_add"]);
+    res.json({ ok: true, missingTable: out.missingTable, ...summarizeSizeHesitation(out.rows) });
+  } catch (err) {
+    console.error("[admin/size-hesitation] read failed:", err?.message);
+    res.status(500).json({ ok: false, error: err?.message });
+  }
+}
+app.get("/api/admin/size-hesitation", requireAdminAuth, getSizeHesitation);
 
 /* ── POST: save a session → appends to sessions.json ─────────────────────── */
 /* Optional host→store map for tagging INCOMING sessions, e.g.

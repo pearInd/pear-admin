@@ -292,6 +292,49 @@
         <button id="btnShowAllSizes" class="dash-btn full-page-trigger" type="button">הצג הכל</button>
       </section>
 
+      <!-- Size hesitation (2026-11-25): GET /api/admin/size-hesitation, from the
+           room's size switches and cart adds (room_events). -->
+      <section class="card" dir="rtl">
+        <h2 class="card__title">התלבטות בין מידות</h2>
+        <div class="stat-row">
+          <div class="stat-card">
+            <span class="stat-card__num" id="hesTotal">0</span>
+            <span class="stat-card__label">לקוחות שהתלבטו</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-card__num" id="hesAvgSizes">-</span>
+            <span class="stat-card__label">ממוצע מידות שנבדקו</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-card__num" id="hesCart">0</span>
+            <span class="stat-card__label">הוסיפו לסל בסוף</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-card__num" id="hesRec">-</span>
+            <span class="stat-card__label">בחרו בסוף את המידה המומלצת</span>
+          </div>
+        </div>
+        <h3 class="card__subtitle">טווחי המידות הנפוצים</h3>
+        <div id="hesRanges" class="rank-list"></div>
+        <h3 class="card__subtitle">התלבטויות אחרונות</h3>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>פריט</th>
+                <th>מידה מומלצת</th>
+                <th>מידות שנבדקו</th>
+                <th>נבחרה בסוף</th>
+                <th>תאריך ושעה</th>
+              </tr>
+            </thead>
+            <tbody id="hesRows"></tbody>
+          </table>
+        </div>
+        <p id="hesEmpty" class="empty" hidden>עדיין אין התלבטויות: אף לקוח לא החליף מידה בחדר המדידה.</p>
+        <p id="hesPending" class="empty" hidden>הטבלה room_events עוד לא נוצרה במסד הנתונים (supabase_setup_v9.sql).</p>
+      </section>
+
       <section class="card">
         <h2 class="card__title">All Sessions</h2>
         <div class="table-scroll">
@@ -1096,6 +1139,7 @@
         renderRows(sessions);
         loadUsers();
         loadAverages();
+        loadSizeHesitation();
       } catch (err) {
         console.error("[admin] loadSessions failed:", err);
         const errEl = $("dashError");
@@ -1293,6 +1337,58 @@
         if (weightEl) weightEl.textContent = data.avgWeight != null ? `${data.avgWeight} ק"ג` : "";
       } catch (err) {
         console.error("[admin] loadAverages failed:", err);
+      }
+    }
+
+    /* size hesitation - GET /api/admin/size-hesitation (lib/size-hesitation.js
+       explains what counts as a hesitation and as the final size) */
+    async function loadSizeHesitation() {
+      try {
+        const url = withStore("/api/admin/size-hesitation?_=" + Date.now());
+        const res = await authedFetch(url, { cache: "no-store" });
+        if (res.status === 401) { await adminSupabase.auth.signOut(); showLogin(); return; }
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || data.ok === false) return;
+        renderSizeHesitation(data);
+      } catch (err) {
+        console.error("[admin] loadSizeHesitation failed:", err);
+      }
+    }
+
+    function renderSizeHesitation(d) {
+      const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+      set("hesTotal", d.hesitations || 0);
+      set("hesAvgSizes", d.avgSizesConsidered != null ? d.avgSizesConsidered : "-");
+      set("hesCart", d.endedInCart || 0);
+      set("hesRec", d.withRecommendation ? `${d.finalIsRecommended}/${d.withRecommendation}` : "-");
+
+      const pending = $("hesPending");
+      const empty = $("hesEmpty");
+      if (pending) pending.hidden = !d.missingTable;
+      if (empty) empty.hidden = !!d.missingTable || (d.hesitations || 0) > 0;
+
+      const ranges = (d.ranges || []).slice(0, 5).map((r) => ({
+        label: r.range,
+        sub: (r.finals || []).length
+          ? "נבחרה בסוף: " + r.finals.map((f) => `${f.size} (${f.count})`).join(", ")
+          : "",
+        count: r.count,
+      }));
+      const grid = $("hesRanges");
+      if (grid) grid.innerHTML = rankListHTML(ranges, "לקוחות");
+
+      const tbody = $("hesRows");
+      if (tbody) {
+        tbody.innerHTML = (d.recent || []).slice(0, 10).map((h) =>
+          `<tr>` +
+          `<td><span class="garment-name">${esc(h.garment)}</span></td>` +
+          `<td>${h.recommended ? `<span class="size-badge">${esc(h.recommended)}</span>` : ""}</td>` +
+          `<td>${(h.sizes || []).map((s) => `<span class="size-badge">${esc(s)}</span>`).join(" ")}</td>` +
+          `<td>${h.final ? `<span class="size-badge">${esc(h.final)}</span> ` : ""}` +
+            `<span class="rank-item__sub">${h.finalSource === "cart" ? "נוספה לסל" : "המידה האחרונה, בלי הוספה לסל"}</span></td>` +
+          `<td class="cell-time">${esc(timeCell(h.at))}</td>` +
+          `</tr>`
+        ).join("");
       }
     }
 
