@@ -335,6 +335,44 @@
         <p id="hesPending" class="empty" hidden>הטבלה room_events עוד לא נוצרה במסד הנתונים (supabase_setup_v9.sql).</p>
       </section>
 
+      <!-- Cart adds (2026-11-25): GET /api/admin/room-events?type=cart_add,cart_open,
+           the room's add-to-cart button and cart icon (room_events). Refreshes by itself. -->
+      <section class="card" dir="rtl">
+        <h2 class="card__title">הוספות לסל מתוך הממשק</h2>
+        <div class="stat-row">
+          <div class="stat-card">
+            <span class="stat-card__num" id="cartAdds">0</span>
+            <span class="stat-card__label">הוספות לסל</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-card__num" id="cartShoppers">0</span>
+            <span class="stat-card__label">לקוחות שהוסיפו לסל</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-card__num" id="cartOpens">0</span>
+            <span class="stat-card__label">לחיצות על אייקון הסל</span>
+          </div>
+        </div>
+        <h3 class="card__subtitle">המוצרים שהכי הרבה הוסיפו לסל</h3>
+        <div id="cartProducts" class="rank-list"></div>
+        <h3 class="card__subtitle">הוספות אחרונות</h3>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>פריט</th>
+                <th>מידה</th>
+                <th>תאריך ושעה</th>
+              </tr>
+            </thead>
+            <tbody id="cartRows"></tbody>
+          </table>
+        </div>
+        <p id="cartEmpty" class="empty" hidden>עדיין אף לקוח לא הוסיף מוצר לסל מתוך חדר המדידה.</p>
+        <p id="cartPending" class="empty" hidden>הטבלה room_events עוד לא נוצרה במסד הנתונים (supabase_setup_v9.sql).</p>
+        <p id="cartUpdated" class="rank-item__sub"></p>
+      </section>
+
       <section class="card">
         <h2 class="card__title">All Sessions</h2>
         <div class="table-scroll">
@@ -1140,6 +1178,7 @@
         loadUsers();
         loadAverages();
         loadSizeHesitation();
+        loadCartEvents();
       } catch (err) {
         console.error("[admin] loadSessions failed:", err);
         const errEl = $("dashError");
@@ -1387,6 +1426,90 @@
           `<td>${h.final ? `<span class="size-badge">${esc(h.final)}</span> ` : ""}` +
             `<span class="rank-item__sub">${h.finalSource === "cart" ? "נוספה לסל" : "המידה האחרונה, בלי הוספה לסל"}</span></td>` +
           `<td class="cell-time">${esc(timeCell(h.at))}</td>` +
+          `</tr>`
+        ).join("");
+      }
+    }
+
+    /* cart adds - GET /api/admin/room-events?type=cart_add,cart_open (2026-11-25).
+       The room writes one cart_add per add it sends to the store and one cart_open per
+       click on its cart icon. The section re-reads itself every CART_REFRESH_MS while
+       the page is visible, so a click in the room shows up without pressing Refresh. */
+    const CART_REFRESH_MS = 15000;
+    let cartTimer = null;
+    async function loadCartEvents() {
+      try {
+        const url = withStore("/api/admin/room-events?type=cart_add,cart_open&_=" + Date.now());
+        const res = await authedFetch(url, { cache: "no-store" });
+        if (res.status === 401) { await adminSupabase.auth.signOut(); showLogin(); return; }
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || data.ok === false) return;
+        renderCartEvents(data);
+      } catch (err) {
+        console.error("[admin] loadCartEvents failed:", err);
+      } finally {
+        if (!cartTimer && $("cartAdds")) {
+          // Stops itself once the dashboard is off screen (logout, 401), so a later
+          // login never runs two pollers side by side.
+          cartTimer = setInterval(() => {
+            if (!$("cartAdds")) { clearInterval(cartTimer); cartTimer = null; return; }
+            if (document.visibilityState === "visible") loadCartEvents();
+          }, CART_REFRESH_MS);
+        }
+      }
+    }
+
+    function summarizeCartEvents(events) {
+      const adds = events.filter((e) => e.event_type === "cart_add");
+      const opens = events.filter((e) => e.event_type === "cart_open");
+      const byProduct = new Map();
+      for (const e of adds) {
+        const name = String(e.garment_name || e.garment_id || "פריט לא מזוהה").trim();
+        if (!byProduct.has(name)) byProduct.set(name, { label: name, count: 0, sizes: new Map() });
+        const p = byProduct.get(name);
+        p.count += 1;
+        const size = String(e.size || "").trim().toUpperCase();
+        if (size) p.sizes.set(size, (p.sizes.get(size) || 0) + 1);
+      }
+      const products = [...byProduct.values()]
+        .sort((a, b) => b.count - a.count)
+        .map((p) => ({
+          label: p.label,
+          sub: [...p.sizes.entries()].sort((a, b) => b[1] - a[1]).map(([s, n]) => `${s} (${n})`).join(", "),
+          count: p.count,
+        }));
+      return {
+        adds: adds.length,
+        shoppers: new Set(adds.map((e) => e.session_id).filter(Boolean)).size,
+        opens: opens.length,
+        products,
+        recent: adds.slice(0, 10),
+      };
+    }
+
+    function renderCartEvents(d) {
+      const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+      const sum = summarizeCartEvents(Array.isArray(d.events) ? d.events : []);
+      set("cartAdds", sum.adds);
+      set("cartShoppers", sum.shoppers);
+      set("cartOpens", sum.opens);
+      set("cartUpdated", "עודכן ב-" + new Date().toLocaleTimeString("he-IL"));
+
+      const pending = $("cartPending");
+      const empty = $("cartEmpty");
+      if (pending) pending.hidden = !d.missingTable;
+      if (empty) empty.hidden = !!d.missingTable || sum.adds > 0;
+
+      const grid = $("cartProducts");
+      if (grid) grid.innerHTML = rankListHTML(sum.products.slice(0, 5), "הוספות");
+
+      const tbody = $("cartRows");
+      if (tbody) {
+        tbody.innerHTML = sum.recent.map((e) =>
+          `<tr>` +
+          `<td><span class="garment-name">${esc(e.garment_name || e.garment_id || "")}</span></td>` +
+          `<td>${e.size ? `<span class="size-badge">${esc(e.size)}</span>` : ""}</td>` +
+          `<td class="cell-time">${esc(timeCell(e.created_at))}</td>` +
           `</tr>`
         ).join("");
       }
